@@ -1,0 +1,54 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# VS Code settings
+.vscode/
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# Logs
+*.log
+
+# Database / SQLite
+*.sqlite3
+*.db
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Spacy / NLP models (optional, can be huge)
+# en_core_web_sm/
+# *.tar.gz
+
+# Pytest cache
+.pytest_cache/
+
+# mypy type checker
+.mypy_cache/
+.dmypy.json
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
