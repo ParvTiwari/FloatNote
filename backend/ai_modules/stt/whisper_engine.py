@@ -3,21 +3,28 @@ import numpy as np
 import sounddevice as sd
 import whisper
 from collections import deque
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 SAMPLE_RATE = 16000
-BUFFER_SECONDS = 4
-CHUNK_SECONDS = 2
+CHUNK_SECONDS = 3
+CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
+BUFFER_SECONDS = 10
+SILENCE_RMS_THRESHOLD = 0.01
+
+app = FastAPI()
+model = whisper.load_model("base") 
 
 queue = asyncio.Queue()
 buffer = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
 loop = None
 stream = None
 
-model = whisper.load_model("base")
-
 def audio_callback(indata, frames, time, status):
-    if loop is None:
+    if status:
+        print(f"⚠️ Audio status: {status}")
         return
+    if loop is None: return
+
     audio = indata[:, 0].copy()
     loop.call_soon_threadsafe(queue.put_nowait, audio)
 
@@ -26,37 +33,62 @@ async def audio_collector():
         samples = await queue.get()
         buffer.extend(samples)
 
-async def start_microphone():
+def is_speech(audio: np.ndarray) -> bool:
+    return np.sqrt(np.mean(audio**2)) > SILENCE_RMS_THRESHOLD
+
+@app.on_event("startup")
+async def start_mic():
     global loop, stream
     loop = asyncio.get_running_loop()
-
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
+        dtype="float32",
+        blocksize=406,
         callback=audio_callback
     )
     stream.start()
-
     asyncio.create_task(audio_collector())
 
-async def transcribe_stream():
-    await start_microphone()
+@app.on_event("shutdown")
+async def cleanup():
+    if stream:
+        stream.stop()
+        stream.close()
 
-    while True:
-        await asyncio.sleep(0.4)
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print("🟢 NLP Client Connected")
 
-        if len(buffer) < SAMPLE_RATE * CHUNK_SECONDS:
-            continue
+    try:
+        while True:
+            if len(buffer) < CHUNK_SIZE:
+                await asyncio.sleep(0.05)
+                continue
 
-        audio = np.array(
-            [buffer.popleft() for _ in range(SAMPLE_RATE * CHUNK_SECONDS)],
-            dtype=np.float32
-        )
+            audio_np = np.fromiter((buffer.popleft() for _ in range(CHUNK_SIZE)), dtype=np.float32, count=CHUNK_SIZE)
 
-        result = await loop.run_in_executor(
-            None, lambda: model.transcribe(audio, fp16=False)
-        )
+            if not is_speech(audio_np):
+                continue
 
-        text = result["text"].strip()
-        if text:
-            yield text
+            result = await loop.run_in_executor(
+                None,
+                lambda: model.transcribe(
+                    audio_np,
+                    fp16=False,
+                    language="en", # Hardcoding saves 100-200ms of detection time
+                    temperature=0
+                )
+            )
+
+            text = result.get("text", "").strip()
+            
+            if len(text) > 2:
+                # Send clean text to your NLP client
+                await ws.send_text(text)
+
+    except WebSocketDisconnect:
+        print("🔴 Client disconnected")
+    except Exception as e:
+        print(f"❌ Error: {e}")
