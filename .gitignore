@@ -52,3 +52,9 @@ htmlcov/
 
 # Jupyter notebooks checkpoints
 .ipynb_checkpoints/
+
+node_modules/
+venv/
+.env
+dist/
+build/
