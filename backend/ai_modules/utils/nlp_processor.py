@@ -1,5 +1,3 @@
-import asyncio
-import websockets
 import spacy
 from spacy.matcher import Matcher
 
@@ -53,33 +51,3 @@ def process_text(raw_text):
         "keywords": list(set(entities)),
         "actions": list(set(actions))
     }
-
-async def main():
-    uri = "ws://localhost:8000/ws"
-    print("🛰️ Connecting to STT Server...")
-    while True:
-        try:
-            async with websockets.connect(uri) as ws:
-                print("✅ Connected. Listening for speech...")
-                while True:
-                    transcript = await ws.recv()
-                    analysis = process_text(transcript)
-
-                    print("\n" + "="*50)
-                    print(f"🎤 TRANSCRIPT: {analysis['text']}")
-                    if analysis['keywords']:
-                        print(f"🔑 KEYWORDS:   {', '.join(analysis['keywords'])}")
-                    if analysis['actions']:
-                        for act in analysis['actions']:
-                            print(f"✅ ACTION:     {act}")
-                    else:
-                        print("ℹ️  No actions detected")
-
-                    print("="*50)
-
-        except Exception as e:
-            print(f"🔄 Reconnecting in 2s... {e}")
-            await asyncio.sleep(2)
-
-if __name__ == "__main__":
-    asyncio.run(main())

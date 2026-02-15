@@ -1,75 +1,113 @@
 import asyncio
+import os
+import sys
 import numpy as np
 import sounddevice as sd
 import whisper
 from collections import deque
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
 
+# ✅ FIXED NLP IMPORT
+utils_path = os.path.join(os.path.dirname(__file__), '../utils')
+sys.path.insert(0, utils_path)
+from nlp_processor import process_text
+
+# ---------------- FIXED CONFIG ----------------
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 3
 CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
-BUFFER_SECONDS = 10
-SILENCE_RMS_THRESHOLD = 0.01
+BUFFER_SECONDS = 8  # ↓ Reduced from 10s
+SILENCE_RMS_THRESHOLD = 0.015  # ↑ Slightly higher
+MAX_WS_CLIENTS = 3  # Prevent spam
 
-app = FastAPI()
-model = whisper.load_model("base") 
-
-queue = asyncio.Queue()
-buffer = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
-loop = None
-stream = None
-
-def audio_callback(indata, frames, time, status):
-    if status:
-        print(f"⚠️ Audio status: {status}")
-        return
-    if loop is None: return
-
-    audio = indata[:, 0].copy()
-    loop.call_soon_threadsafe(queue.put_nowait, audio)
-
-async def audio_collector():
-    while True:
-        samples = await queue.get()
-        buffer.extend(samples)
-
-def is_speech(audio: np.ndarray) -> bool:
-    return np.sqrt(np.mean(audio**2)) > SILENCE_RMS_THRESHOLD
-
-@app.on_event("startup")
-async def start_mic():
+# ---------------- LIFESPAN ----------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global loop, stream
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="float32",
-        blocksize=406,
+        blocksize=512,  # ↑ Fixed overflow
         callback=audio_callback
     )
     stream.start()
     asyncio.create_task(audio_collector())
-
-@app.on_event("shutdown")
-async def cleanup():
+    print("🎤 Microphone started")
+    yield
     if stream:
         stream.stop()
         stream.close()
 
+app = FastAPI(lifespan=lifespan)
+model = whisper.load_model("base")
+queue = asyncio.Queue(maxsize=100)  # ✅ Fixed queue overflow
+buffer = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
+loop = None
+stream = None
+clients = set()  # Track active clients
+
+def audio_callback(indata, frames, time, status):
+    if status:
+        print(f"⚠️ Audio status: {status}")
+        return
+    if loop is None: 
+        return
+    try:
+        audio = indata[:, 0].copy()
+        if not queue.full():  # Prevent overflow
+            loop.call_soon_threadsafe(queue.put_nowait, audio)
+    except:
+        pass  # Silent drop
+
+async def audio_collector():
+    while True:
+        try:
+            samples = await asyncio.wait_for(queue.get(), timeout=1.0)
+            buffer.extend(samples)
+            queue.task_done()
+        except asyncio.TimeoutError:
+            continue
+
+def is_speech(audio: np.ndarray) -> bool:
+    return np.sqrt(np.mean(audio**2)) > SILENCE_RMS_THRESHOLD
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # ✅ PING/PONG + Client limiting
     await ws.accept()
-    print("🟢 NLP Client Connected")
-
+    client_id = id(ws)
+    clients.add(client_id)
+    print(f"🟢 Client {len(clients)} connected")
+    
+    if len(clients) > MAX_WS_CLIENTS:
+        await ws.close(code=1008, reason="Too many clients")
+        return
+        
     try:
+        # Ping every 30s to keep alive
+        ping_task = asyncio.create_task(ping_client(ws))
+        
         while True:
             if len(buffer) < CHUNK_SIZE:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
                 continue
 
-            audio_np = np.fromiter((buffer.popleft() for _ in range(CHUNK_SIZE)), dtype=np.float32, count=CHUNK_SIZE)
-
-            if not is_speech(audio_np):
+            # ✅ FIXED: Validate buffer size
+            if len(buffer) < CHUNK_SIZE:
+                continue
+                
+            audio_np = np.fromiter(
+                list(buffer)[0:CHUNK_SIZE],  # Safe slicing
+                dtype=np.float32, 
+                count=CHUNK_SIZE
+            )
+            
+            # ✅ Skip if not enough valid audio
+            if len(audio_np) < CHUNK_SIZE * 0.8 or not is_speech(audio_np):
+                buffer.clear()  # Reset buffer
                 continue
 
             result = await loop.run_in_executor(
@@ -77,18 +115,47 @@ async def websocket_endpoint(ws: WebSocket):
                 lambda: model.transcribe(
                     audio_np,
                     fp16=False,
-                    language="en", # Hardcoding saves 100-200ms of detection time
+                    language="en",
                     temperature=0
                 )
             )
 
             text = result.get("text", "").strip()
+            buffer.clear()  # Reset after processing
             
             if len(text) > 2:
-                # Send clean text to your NLP client
-                await ws.send_text(text)
+                analysis = process_text(text)
+                
+                # ✅ Send to ALL clients
+                disconnected = []
+                for client_id in list(clients):
+                    try:
+                        await ws.send_json(analysis)
+                    except:
+                        disconnected.append(client_id)
+                
+                # Cleanup dead clients
+                for cid in disconnected:
+                    clients.discard(cid)
 
     except WebSocketDisconnect:
-        print("🔴 Client disconnected")
+        pass
     except Exception as e:
         print(f"❌ Error: {e}")
+    finally:
+        clients.discard(client_id)
+        ping_task.cancel()
+        print(f"🔴 Client disconnected. Active: {len(clients)}")
+
+async def ping_client(ws: WebSocket):
+    """Keep connection alive"""
+    while True:
+        try:
+            await asyncio.sleep(25)
+            await ws.ping()
+        except:
+            break
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
