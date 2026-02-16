@@ -7,7 +7,6 @@ function createWindow() {
   });
 
   win.loadURL("http://localhost:5173");
-  win.webContents.openDevTools(); 
 }
 
 app.whenReady().then(createWindow);

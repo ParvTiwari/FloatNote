@@ -139,8 +139,6 @@ function App() {
                 </div>
               ))}
               
-              {/* ✅ Remove transcriptEndRef div */}
-              
               {/* Empty state */}
               {transcript.length === 0 && (
                 <div className="h-full flex items-center justify-center text-gray-400">
