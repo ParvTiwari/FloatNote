@@ -16,7 +16,7 @@ SAMPLE_RATE = 16000
 CHUNK_SECONDS = 3
 CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
 BUFFER_SECONDS = 8
-SILENCE_RMS_THRESHOLD = 0.015
+SILENCE_RMS_THRESHOLD = 0.0001  # Lowered from 0.015 to match actual mic levels
 MAX_WS_CLIENTS = 3
 
 # ---------------- LIFESPAN ----------------
@@ -45,7 +45,7 @@ queue = asyncio.Queue(maxsize=100)
 buffer = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
 loop = None
 stream = None
-clients = set()  # Track active clients
+clients = {}  # Track active clients: {client_id: websocket}
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -77,7 +77,7 @@ async def websocket_endpoint(ws: WebSocket):
     # PING/PONG + Client limiting
     await ws.accept()
     client_id = id(ws)
-    clients.add(client_id)
+    clients[client_id] = ws
     print(f"🟢 Client {len(clients)} connected")
     
     if len(clients) > MAX_WS_CLIENTS:
@@ -95,18 +95,29 @@ async def websocket_endpoint(ws: WebSocket):
 
             if len(buffer) < CHUNK_SIZE:
                 continue
-                
+            
+            print(f"📊 Buffer size: {len(buffer)}, CHUNK_SIZE: {CHUNK_SIZE}")
             audio_np = np.fromiter(
                 list(buffer)[0:CHUNK_SIZE],  # Safe slicing
                 dtype=np.float32, 
                 count=CHUNK_SIZE
             )
             
+            rms = np.sqrt(np.mean(audio_np**2))
+            print(f"🔊 RMS: {rms:.6f}, Threshold: {SILENCE_RMS_THRESHOLD}")
+            
             # Skip if not enough valid audio
-            if len(audio_np) < CHUNK_SIZE * 0.8 or not is_speech(audio_np):
-                buffer.clear()  # Reset buffer
+            if len(audio_np) < CHUNK_SIZE * 0.8:
+                print("❌ Not enough audio data")
+                buffer.clear()
                 continue
-
+                
+            if not is_speech(audio_np):
+                print("❌ Silence detected, skipping")
+                buffer.clear()
+                continue
+            
+            print("✅ Speech detected! Transcribing...")
             result = await loop.run_in_executor(
                 None,
                 lambda: model.transcribe(
@@ -118,29 +129,35 @@ async def websocket_endpoint(ws: WebSocket):
             )
 
             text = result.get("text", "").strip()
-            buffer.clear()  # Reset after processing
+            print(f"📝 Transcribed: '{text}'")
+            buffer.clear()
             
             if len(text) > 2:
+                print(f"✨ Sending to {len(clients)} clients: {text}")
                 analysis = process_text(text)
                 
                 # Send to ALL clients
                 disconnected = []
-                for client_id in list(clients):
+                for client_id, client_ws in list(clients.items()):
                     try:
-                        await ws.send_json(analysis)
-                    except:
+                        await client_ws.send_json(analysis)
+                        print(f"✅ Sent to client {client_id}")
+                    except Exception as e:
+                        print(f"❌ Failed to send to client {client_id}: {e}")
                         disconnected.append(client_id)
                 
                 # Cleanup dead clients
                 for cid in disconnected:
-                    clients.discard(cid)
+                    clients.pop(cid, None)
+            else:
+                print(f"⏭️  Text too short ({len(text)} chars), skipping")
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
         print(f"❌ Error: {e}")
     finally:
-        clients.discard(client_id)
+        clients.pop(client_id, None)
         ping_task.cancel()
         print(f"🔴 Client disconnected. Active: {len(clients)}")
 
