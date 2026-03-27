@@ -2,10 +2,16 @@
 
 import os
 from dotenv import load_dotenv
-
-from langchain_huggingface import HuggingFaceEndpoint
+from huggingface_hub import InferenceClient
 
 load_dotenv()
+
+DEFAULT_SUMMARIZER_REPO_ID = "facebook/bart-large-cnn"
+SUPPORTED_SUMMARIZER_MODELS = {
+    "facebook/bart-large-cnn",
+    "google/pegasus-xsum",
+    "sshleifer/distilbart-cnn-12-6",
+}
 
 
 def build_text(data):
@@ -30,26 +36,25 @@ def build_text(data):
 
 def summarize_meeting(all_data):
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-    prompt = (
-        "Summarize the following meeting into:\n"
-        "1. Summary\n"
-        "2. Key Points\n"
-        "3. Action Items\n\n"
-        + build_text(all_data)
-    )
+    repo_id = os.getenv("HF_SUMMARIZER_REPO_ID", DEFAULT_SUMMARIZER_REPO_ID)
+    meeting_text = build_text(all_data)
 
     if token:
         try:
-            llm = HuggingFaceEndpoint(
-                repo_id="google/flan-t5-large",
-                temperature=0,
-                max_new_tokens=512,
-            )
+            if repo_id not in SUPPORTED_SUMMARIZER_MODELS:
+                raise ValueError(
+                    f"Unsupported HF_SUMMARIZER_REPO_ID '{repo_id}'. "
+                    f"Choose one of: {', '.join(sorted(SUPPORTED_SUMMARIZER_MODELS))}"
+                )
 
-            result = llm.invoke(prompt)
-            if isinstance(result, str):
-                return result
-            return str(result)
+            client = InferenceClient(model=repo_id, token=token, timeout=60)
+            result = client.summarization(meeting_text)
+            summary_text = getattr(result, "summary_text", "").strip()
+
+            if summary_text:
+                return f"Summary\n{summary_text}"
+
+            raise ValueError(f"Unexpected Hugging Face response: {result}")
         except Exception as exc:
             print(f"Hugging Face summarizer failed: {exc}")
     else:
