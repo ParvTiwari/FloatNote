@@ -1,0 +1,5 @@
+transformers
+torch
+langchain
+langchain-community
+langchain-huggingface
