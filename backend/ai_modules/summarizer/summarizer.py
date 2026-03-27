@@ -1,5 +1,5 @@
 # backend/ai_modules/summarizer/summarizer.py
-
+# some changes made
 import os
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
