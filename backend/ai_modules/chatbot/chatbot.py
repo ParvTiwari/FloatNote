@@ -1,11 +1,16 @@
 import os
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings, ChatHuggingFace
+from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
+
+DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
 
 def convert_to_documents(all_data):
     docs = []
@@ -30,64 +35,66 @@ def convert_to_documents(all_data):
 
     return docs
 
+
 def create_vector_store(docs):
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    return FAISS.from_documents(docs, embeddings)
 
-    vector_db = FAISS.from_documents(docs, embeddings)
-
-    return vector_db
 
 def get_llm():
-    import os
-    from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
+    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    model_name = os.getenv("HUGGINGFACE_CHAT_MODEL", DEFAULT_CHAT_MODEL)
 
     if not token:
-        raise ValueError("❌ HuggingFace token missing in .env")
+        raise ValueError("HUGGINGFACEHUB_API_TOKEN is missing in backend/.env")
 
-    base_llm = HuggingFaceEndpoint(
-        repo_id="HuggingFaceH4/zephyr-7b-beta",
-        task="conversational",
-        temperature=0,
-        max_new_tokens=30,
+    endpoint = HuggingFaceEndpoint(
+        repo_id=model_name,
+        task="text-generation",
         huggingfacehub_api_token=token,
+        max_new_tokens=256,
+        temperature=0.2,
+        top_p=0.9,
+        do_sample=False,
+        return_full_text=False,
+        timeout=120,
     )
 
-    llm = ChatHuggingFace(llm=base_llm)
+    return ChatHuggingFace(llm=endpoint)
 
-    return llm
 
 def ask_question(query, vector_db):
-    retriever = vector_db.as_retriever()
+    clean_query = query.strip()
+    if not clean_query:
+        return "Please ask a question."
 
-    docs = retriever.invoke(query)
+    retriever = vector_db.as_retriever(search_kwargs={"k": 4})
+    docs = retriever.invoke(clean_query)
 
-    context = "\n".join([doc.page_content for doc in docs])
+    if not docs:
+        return "I could not find anything relevant in the meeting data."
 
-    prompt = f"""
-    You are a meeting assistant.
-
-    Answer ONLY the given question using the context.
-
-    STRICT RULES:
-    - Do NOT generate extra questions
-    - Do NOT continue conversation
-    - Give ONLY final answer
-    - Keep answer short and precise
-
-    Context:
-    {context}
-
-    Question:
-    {query}
-
-    Final Answer:
-    """
+    context = "\n\n".join(doc.page_content for doc in docs)
+    messages = [
+        SystemMessage(
+            content=(
+                "You are a meeting assistant. "
+                "Answer only from the provided context. "
+                "If the answer is not in the context, say that clearly. "
+                "Do not invent facts, do not ask follow-up questions, and keep the answer concise."
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"Context:\n{context}\n\n"
+                f"Question: {clean_query}\n\n"
+                "Answer in 2 to 4 sentences."
+            )
+        ),
+    ]
 
     llm = get_llm()
-
-    response = llm.invoke(prompt)
-    return response.content
+    response = llm.invoke(messages)
+    return response.content.strip()
