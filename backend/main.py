@@ -1,10 +1,21 @@
-import os
+﻿import os
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="TypedStorage is deprecated"
+)
 
 from ai_modules.stt.whisper_engine import run_server
 from ai_modules.summarizer.summarizer import summarize_meeting
+from ai_modules.chatbot.chatbot import (
+    convert_to_documents,
+    create_vector_store,
+    ask_question,
+)
 
 
-def build_demo_summary_input():
+def build_demo_data():
     return [
         {
             "source": "audio",
@@ -37,7 +48,7 @@ def build_demo_summary_input():
         {
             "source": "ocr",
             "speaker": None,
-            "text": "Slide shows: Final deadline is 30th March. Testing phase starts from 25th March.",
+            "text": "Final deadline is 30th March. Testing phase starts from 25th March.",
             "keywords": ["deadline", "testing"],
             "actions": [],
         },
@@ -65,7 +76,7 @@ def build_demo_summary_input():
         {
             "source": "ocr",
             "speaker": None,
-            "text": "Displayed on screen: Review meeting scheduled on 29th March at 10 AM.",
+            "text": "Review meeting scheduled on 29th March at 10 AM.",
             "keywords": ["meeting", "schedule"],
             "actions": [],
         },
@@ -73,9 +84,32 @@ def build_demo_summary_input():
 
 
 if __name__ == "__main__":
-    if os.getenv("RUN_SUMMARY_DEMO", "").strip().lower() in {"1", "true", "yes"}:
-        print(summarize_meeting(build_demo_summary_input()))
+
+    if os.getenv("RUN_CHATBOT_DEMO", "").strip().lower() in {"1", "true", "yes"}:
+        print("🚀 Chatbot Mode\n")
+
+        data = build_demo_data()
+        docs = convert_to_documents(data)
+        vector_db = create_vector_store(docs)
+
+        print("✅ Chatbot Ready! Type 'exit' to quit.\n")
+
+        while True:
+            query = input("Ask: ")
+
+            if query.lower() in {"exit", "quit"}:
+                print("👋 Exiting chatbot...")
+                break
+
+            answer = ask_question(query, vector_db)
+            print("\n🤖 Answer:\n", answer, "\n")
+
+    elif os.getenv("RUN_SUMMARY_DEMO", "").strip().lower() in {"1", "true", "yes"}:
+        print("📝 Summary Mode\n")
+        print(summarize_meeting(build_demo_data()))
+
     else:
+        print("🌐 Running Server...\n")
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8000"))
         run_server(host=host, port=port)
