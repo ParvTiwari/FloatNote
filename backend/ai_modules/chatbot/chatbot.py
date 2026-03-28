@@ -11,6 +11,11 @@ load_dotenv()
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="`resume_download` is deprecated"
+)
 
 def convert_to_documents(all_data):
     docs = []
