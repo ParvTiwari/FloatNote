@@ -41,7 +41,7 @@ active_meeting_id: int | None = None
 
 
 async def database_worker_loop():
-    print("Database worker started. Waiting for live data...")
+    print("💾 Database worker started. Waiting for live data...")
     while True:
         try:
             payload = await db_queue.get()
@@ -58,7 +58,7 @@ async def database_worker_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    print("Database initialized")
+    print("🗄️ Database initialized")
     global loop, stream, ocr_processor
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
@@ -75,15 +75,15 @@ async def lifespan(app: FastAPI):
             change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
         )
         print(
-            f"OCR enabled | monitor_index={ocr_processor.monitor_index} "
+            f"🖥️ OCR enabled | monitor_index={ocr_processor.monitor_index} "
             f"interval={ocr_processor.check_interval}s"
         )
     else:
-        print("OCR disabled because ENABLE_OCR is not true")
+        print("⚠️ OCR disabled because ENABLE_OCR is not true")
 
     asyncio.create_task(audio_collector())
     asyncio.create_task(database_worker_loop())
-    print("Microphone started")
+    print("🎤 Microphone started")
 
     yield
 
@@ -108,7 +108,7 @@ model = whisper.load_model("base")
 
 def audio_callback(indata, frames, time, status):
     if status:
-        print(f"Audio status: {status}")
+        print(f"⚠️ Audio status: {status}")
         return
     if loop is None:
         return
@@ -146,10 +146,10 @@ async def websocket_endpoint(ws: WebSocket):
     if active_meeting_id is None:
         active_meeting = await create_new_meeting()
         active_meeting_id = active_meeting.id
-        print(f"Started meeting #{active_meeting_id}")
+        print(f"🆕 Started meeting #{active_meeting_id}")
 
     clients.add(ws)
-    print(f"Client {len(clients)} connected")
+    print(f"🟢 Client {len(clients)} connected")
     ping_task = None
 
     await ws.send_json({
@@ -175,7 +175,7 @@ async def websocket_endpoint(ws: WebSocket):
 
             if current_volume > 0.0005:
                 print(
-                    f"[DEBUG] Mic Volume: {current_volume:.5f} "
+                    f"🔊 [DEBUG] Mic Volume: {current_volume:.5f} "
                     f"(Required: > {SILENCE_RMS_THRESHOLD})"
                 )
 
@@ -196,10 +196,10 @@ async def websocket_endpoint(ws: WebSocket):
                 )
 
             try:
-                print("[DEBUG] Sending to Whisper for processing...")
+                print("🧠 [DEBUG] Sending to Whisper for processing...")
                 result = await loop.run_in_executor(None, _transcribe)
             except Exception as transcribe_err:
-                print(f"Whisper error: {transcribe_err}")
+                print(f"⚠️ Whisper error: {transcribe_err}")
                 continue
 
             for _ in range(min(CHUNK_SIZE, len(buffer))):
@@ -222,7 +222,7 @@ async def websocket_endpoint(ws: WebSocket):
             analysis["ocr"] = ocr_result
             analysis["meeting_id"] = active_meeting_id
             print(
-                f"Broadcasting text='{text[:60]}' | "
+                f"📤 Broadcasting text='{text[:60]}' | "
                 f"ocr_len={len(ocr_result['text'])} "
                 f"ocr_keywords={ocr_result['keywords'][:3]}"
             )
@@ -233,7 +233,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "data": analysis,
                 })
             except asyncio.QueueFull:
-                print("[DB Queue Full] Dropping data packet!")
+                print("⚠️ [DB Queue Full] Dropping data packet!")
 
             disconnected: list[WebSocket] = []
             for client_ws in list(clients):
@@ -248,15 +248,15 @@ async def websocket_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
     finally:
         clients.discard(ws)
         if ping_task is not None:
             ping_task.cancel()
         if not clients:
             active_meeting_id = None
-            print("Active meeting closed. Next connection will create a new meeting.")
-        print(f"Client disconnected. Active: {len(clients)}")
+            print("🔁 Active meeting closed. Next connection will create a new meeting.")
+        print(f"🔴 Client disconnected. Active: {len(clients)}")
 
 
 async def ping_client(ws: WebSocket):
