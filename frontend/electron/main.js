@@ -10,6 +10,8 @@ function createWindow() {
     // skipTaskbar: true,
   });
 
+  win.setContentProtection(true);
+
   win.loadURL("http://localhost:5173");
 }
 
