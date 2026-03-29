@@ -5,27 +5,36 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+async def create_meeting(session, title: str = "Live FloatNote Meeting"):
+    meeting = Meeting(title=title)
+    session.add(meeting)
+    await session.commit()
+    await session.refresh(meeting)
+    return meeting
+
+async def create_new_meeting(title: str = "Live FloatNote Meeting") -> Meeting:
+    async with AsyncSessionLocal() as session:
+        return await create_meeting(session, title=title)
+
 async def get_current_meeting_id(session):
     result = await session.execute(select(Meeting).order_by(Meeting.id.desc()).limit(1))
     meeting = result.scalars().first()
     if not meeting:
-        meeting = Meeting(title="Live FloatNote Meeting")
-        session.add(meeting)
-        await session.commit()
-        await session.refresh(meeting)
+        meeting = await create_meeting(session)
     return meeting.id
 
-async def save_to_database(data: dict):
+async def save_to_database(data: dict, meeting_id: int | None = None):
     async with AsyncSessionLocal() as session:
         try:
-            meeting_id = await get_current_meeting_id(session)
+            if meeting_id is None:
+                meeting_id = await get_current_meeting_id(session)
 
             # --- 1. AUDIO TRANSCRIPT SAVE ---
-            speaker_label = "unknown"
+            speaker_label = "MIC"
             if data.get("text"):
                 # Speaker nikaalo (Agar PyAnnote ne bheja hai)
                 if data.get("speakers") and len(data["speakers"]) > 0:
-                    speaker_label = data["speakers"][0].get("speaker", "unknown")
+                    speaker_label = data["speakers"][0].get("speaker") or "MIC"
                 
                 keywords_list = data.get("keywords", [])
                 audio_keywords = ",".join(keywords_list) if isinstance(keywords_list, list) else ""
