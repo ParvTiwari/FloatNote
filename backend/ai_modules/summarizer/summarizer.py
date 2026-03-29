@@ -13,26 +13,17 @@ SUPPORTED_SUMMARIZER_MODELS = {
     "sshleifer/distilbart-cnn-12-6",
 }
 
-
 def build_text(data):
-    final_text = ""
+    lines = []
 
     for item in data:
-        if item["speaker"]:
-            final_text += f"{item['speaker']}: {item['text']}\n"
-        else:
-            final_text += f"{item['source']}: {item['text']}\n"
+        text = item.get("text", "")
+        if text:
+            lines.append(text.strip())
 
-        if item["keywords"]:
-            final_text += f"Keywords: {', '.join(item['keywords'])}\n"
+    unique_lines = list(dict.fromkeys(lines))
 
-        if item["actions"]:
-            final_text += f"Actions: {', '.join(item['actions'])}\n"
-
-        final_text += "\n"
-
-    return final_text
-
+    return "\n".join(unique_lines)
 
 def summarize_meeting(all_data):
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
