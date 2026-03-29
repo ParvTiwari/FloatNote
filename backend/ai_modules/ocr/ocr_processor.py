@@ -13,6 +13,8 @@ import spacy
 import pytesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+from .keyword_filter import filter_keywords
+
 class OCRProcessor:
     """Capture screen frames and run OCR only when slide content changes."""
 
@@ -125,7 +127,7 @@ class OCRProcessor:
                     seen.add(normalized)
                     keywords.append(token.text)
 
-        return keywords
+        return filter_keywords(keywords)
 
     def process(self) -> Dict[str, List[str] | str]:
         """Capture screen, detect changes, and OCR only on changed content."""
