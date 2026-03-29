@@ -14,7 +14,7 @@ from nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 
 os.environ.setdefault("ENABLE_OCR", "true")
-os.environ.setdefault("OCR_INTERVAL_SECONDS", "1.0")
+os.environ.setdefault("OCR_INTERVAL_SECONDS", "3.0")
 os.environ.setdefault("OCR_CHANGE_THRESHOLD", "0.02")
 
 SAMPLE_RATE = 16000
@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
         print("⚠️  OCR disabled — ENABLE_OCR is not true")
 
     asyncio.create_task(audio_collector())
+    asyncio.create_task(ocr_broadcaster())
     print("🎤 Microphone started")
 
     yield
@@ -94,6 +95,27 @@ async def audio_collector():
 
 def is_speech(audio: np.ndarray) -> bool:
     return np.sqrt(np.mean(audio**2)) > SILENCE_RMS_THRESHOLD
+
+async def ocr_broadcaster():
+    while True:
+        await asyncio.sleep(1.0)
+        if not clients or ocr_processor is None:
+            continue
+        try:
+            ocr_result = await ocr_processor.process_async()
+            if not ocr_result["text"].strip():
+                continue
+            payload = {"type": "ocr", "ocr": ocr_result}
+            disconnected = []
+            for client_ws in list(clients):
+                try:
+                    await client_ws.send_json(payload)
+                except Exception:
+                    disconnected.append(client_ws)
+            for dead in disconnected:
+                clients.discard(dead)
+        except Exception as e:
+            print(f"⚠️  OCR broadcaster error: {e}")
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -162,9 +184,6 @@ async def websocket_endpoint(ws: WebSocket):
                 else OCR_EMPTY_RESULT
             )
             analysis["ocr"] = ocr_result
-            # print(f"📤 text='{text[:60]}' | "
-            #       f"ocr_len={len(ocr_result['text'])} "
-            #       f"ocr_keywords={ocr_result['keywords'][:3]}")
                             
             # Send to ALL clients
             disconnected: list[WebSocket] = []

@@ -37,6 +37,16 @@ function App() {
           return;
         }
 
+        if (data.type === "ocr") {
+          const incoming = data.ocr;
+          if (incoming?.text?.trim().length > 0) {
+            setOcr({ text: incoming.text, keywords: incoming.keywords || [], _everReceived: true });
+          } else {
+            setOcr(prev => ({ ...prev, _everReceived: true }));
+          }
+          return;
+        }
+
         const analysis = data;
 
         setTranscript((prev) => [...prev, analysis.text]);
@@ -64,6 +74,7 @@ function App() {
             setOcr({
               text: incoming.text,
               keywords: incoming.keywords || [],
+              _everReceived: true,
             });
           }
         }
@@ -94,7 +105,6 @@ function App() {
     setTranscript([]);
     setKeywords([]);
     setActions([]);
-    setOcr({ text: "", keywords: [] });
   };
 
   return (
@@ -170,10 +180,12 @@ function App() {
                   className={`px-3 py-1 text-sm font-medium rounded-full ${
                     ocr.text
                       ? "bg-emerald-100 text-emerald-800"
+                      : ocr._everReceived
+                      ? "bg-yellow-100 text-yellow-800"
                       : "bg-gray-100 text-gray-500"
                   }`}
                 >
-                  {ocr.text ? "ACTIVE" : "WAITING"}
+                  {ocr.text ? "ACTIVE" : ocr._everReceived ? "IDLE" : "DISABLED"}
                 </span>
               </h2>
             </div>

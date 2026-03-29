@@ -113,7 +113,13 @@ class OCRProcessor:
         seen = set()
 
         for token in doc:
-            if token.pos_ in {"NOUN", "PROPN"}:
+            if (
+                token.pos_ in {"NOUN", "PROPN"}
+                and not token.ent_type_
+                and not token.is_stop
+                and not token.is_punct
+                and len(token.text) > 2
+            ):
                 normalized = token.lemma_.strip().lower()
                 if normalized and normalized not in seen:
                     seen.add(normalized)
