@@ -60,6 +60,7 @@ async def get_meeting_data(meeting_id: int) -> dict | None:
         action_items = action_result.scalars().all()
 
         normalized_items: list[dict] = []
+        normalized_actions: list[str] = []
 
         for transcript in transcripts:
             source = transcript.source or "unknown"
@@ -74,16 +75,11 @@ async def get_meeting_data(meeting_id: int) -> dict | None:
             )
 
         for action in action_items:
-            normalized_items.append(
-                {
-                    "source": "action_item",
-                    "speaker": action.assignee or "unassigned",
-                    "text": action.description or "",
-                    "keywords": [],
-                    "actions": [action.description] if action.description else [],
-                    "status": action.status,
-                }
-            )
+            if action.description:
+                normalized_actions.append(action.description)
+
+        if normalized_actions and normalized_items:
+            normalized_items[0]["actions"] = normalized_actions
 
         return {
             "meeting_id": meeting.id,

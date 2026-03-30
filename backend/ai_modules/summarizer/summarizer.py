@@ -17,13 +17,15 @@ def build_text(data):
     lines = []
 
     for item in data:
+        if item.get("source") == "action_item":
+            continue
         text = item.get("text", "")
         if text:
             lines.append(text.strip())
 
     unique_lines = list(dict.fromkeys(lines))
 
-    return "\n".join(unique_lines)
+    return "\n".join(unique_lines[:20])
 
 def summarize_meeting(all_data):
     if not all_data:
@@ -57,7 +59,11 @@ def summarize_meeting(all_data):
     else:
         print("Hugging Face summarizer skipped: HUGGINGFACEHUB_API_TOKEN is not set.")
 
-    texts = [item["text"] for item in all_data if item.get("text")]
+    texts = [
+        item["text"]
+        for item in all_data
+        if item.get("text") and item.get("source") != "action_item"
+    ]
     keywords = []
     actions = []
     for item in all_data:
@@ -66,7 +72,7 @@ def summarize_meeting(all_data):
 
     unique_keywords = list(dict.fromkeys(keywords))
     unique_actions = list(dict.fromkeys(actions))
-    summary_line = " ".join(texts[:2]).strip() or "No meeting text was provided."
+    summary_line = " ".join(texts[:4]).strip() or "No meeting text was provided."
 
     key_points = unique_keywords if unique_keywords else ["No explicit keywords found"]
     action_items = unique_actions if unique_actions else ["No action items found"]
