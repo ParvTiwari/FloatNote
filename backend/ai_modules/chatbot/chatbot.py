@@ -22,19 +22,33 @@ def convert_to_documents(all_data):
 
     for item in all_data:
         content = ""
+        speaker = item.get("speaker")
+        source = item.get("source", "unknown")
+        text = item.get("text", "").strip()
 
-        if item["speaker"]:
-            content += f"{item['speaker']}: "
+        if speaker:
+            content += f"{speaker}: "
         else:
-            content += f"{item['source']}: "
+            content += f"{source}: "
 
-        content += item["text"]
+        content += text or "No text"
 
         if item.get("keywords"):
             content += f"\nKeywords: {', '.join(item['keywords'])}"
 
-        if item.get("actions"):
-            content += f"\nActions: {', '.join(item['actions'])}"
+        actions = item.get("actions") or item.get("action_items") or []
+        if actions:
+            formatted_actions = []
+            for action in actions:
+                if isinstance(action, dict):
+                    task = action.get("task", "Unknown Task")
+                    assignee = action.get("assignee")
+                    formatted_actions.append(
+                        f"{task} ({assignee})" if assignee else task
+                    )
+                else:
+                    formatted_actions.append(str(action))
+            content += f"\nActions: {', '.join(formatted_actions)}"
 
         docs.append(Document(page_content=content))
 
@@ -42,6 +56,8 @@ def convert_to_documents(all_data):
 
 
 def create_vector_store(docs):
+    if not docs:
+        raise ValueError("No meeting documents are available for chatbot search.")
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     return FAISS.from_documents(docs, embeddings)
 

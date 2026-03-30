@@ -16,12 +16,96 @@ async def create_new_meeting(title: str = "Live FloatNote Meeting") -> Meeting:
     async with AsyncSessionLocal() as session:
         return await create_meeting(session, title=title)
 
+async def get_meeting_by_id(meeting_id: int) -> Meeting | None:
+    async with AsyncSessionLocal() as session:
+        return await session.get(Meeting, meeting_id)
+
+async def get_latest_meeting() -> Meeting | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Meeting).order_by(Meeting.id.desc()).limit(1)
+        )
+        return result.scalars().first()
+
 async def get_current_meeting_id(session):
     result = await session.execute(select(Meeting).order_by(Meeting.id.desc()).limit(1))
     meeting = result.scalars().first()
     if not meeting:
         meeting = await create_meeting(session)
     return meeting.id
+
+def _split_keywords(raw_keywords: str | None) -> list[str]:
+    if not raw_keywords:
+        return []
+    return [keyword.strip() for keyword in raw_keywords.split(",") if keyword.strip()]
+
+async def get_meeting_data(meeting_id: int) -> dict | None:
+    async with AsyncSessionLocal() as session:
+        meeting = await session.get(Meeting, meeting_id)
+        if meeting is None:
+            return None
+
+        transcript_result = await session.execute(
+            select(Transcript)
+            .where(Transcript.meeting_id == meeting_id)
+            .order_by(Transcript.timestamp.asc(), Transcript.id.asc())
+        )
+        transcripts = transcript_result.scalars().all()
+
+        action_result = await session.execute(
+            select(ActionItem)
+            .where(ActionItem.meeting_id == meeting_id)
+            .order_by(ActionItem.id.asc())
+        )
+        action_items = action_result.scalars().all()
+
+        normalized_items: list[dict] = []
+
+        for transcript in transcripts:
+            source = transcript.source or "unknown"
+            normalized_items.append(
+                {
+                    "source": "ocr" if source.upper() == "OCR" else "audio",
+                    "speaker": None if source.upper() == "OCR" else source,
+                    "text": transcript.text or "",
+                    "keywords": _split_keywords(transcript.keywords),
+                    "actions": [],
+                }
+            )
+
+        for action in action_items:
+            normalized_items.append(
+                {
+                    "source": "action_item",
+                    "speaker": action.assignee or "unassigned",
+                    "text": action.description or "",
+                    "keywords": [],
+                    "actions": [action.description] if action.description else [],
+                    "status": action.status,
+                }
+            )
+
+        return {
+            "meeting_id": meeting.id,
+            "title": meeting.title,
+            "summary": meeting.summary,
+            "items": normalized_items,
+        }
+
+async def get_latest_meeting_data() -> dict | None:
+    meeting = await get_latest_meeting()
+    if meeting is None:
+        return None
+    return await get_meeting_data(meeting.id)
+
+async def save_meeting_summary(meeting_id: int, summary: str) -> bool:
+    async with AsyncSessionLocal() as session:
+        meeting = await session.get(Meeting, meeting_id)
+        if meeting is None:
+            return False
+        meeting.summary = summary
+        await session.commit()
+        return True
 
 async def save_to_database(data: dict, meeting_id: int | None = None):
     async with AsyncSessionLocal() as session:

@@ -26,9 +26,15 @@ def build_text(data):
     return "\n".join(unique_lines)
 
 def summarize_meeting(all_data):
+    if not all_data:
+        return "Summary\nNo meeting data was provided."
+
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
     repo_id = os.getenv("HF_SUMMARIZER_REPO_ID", DEFAULT_SUMMARIZER_REPO_ID)
     meeting_text = build_text(all_data)
+
+    if not meeting_text.strip():
+        return "Summary\nNo meeting text was provided."
 
     if token:
         try:
