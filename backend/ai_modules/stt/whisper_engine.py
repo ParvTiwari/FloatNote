@@ -1,6 +1,5 @@
 import asyncio
 import os
-import sys
 from collections import deque
 from contextlib import asynccontextmanager
 
@@ -12,9 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database.crud import create_new_meeting, init_db, save_to_database
 
-utils_path = os.path.join(os.path.dirname(__file__), "../utils")
-sys.path.insert(0, utils_path)
-from nlp_processor import process_text
+from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 
 os.environ.setdefault("ENABLE_OCR", "true")
