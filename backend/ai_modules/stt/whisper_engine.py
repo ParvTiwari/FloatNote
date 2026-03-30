@@ -85,7 +85,7 @@ async def database_worker_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    print("🗄️ Database initialized")
+    print("🗄️  Database initialized")
     global loop, stream, ocr_processor
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
             change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
         )
         print(
-            f"🖥️ OCR enabled | monitor_index={ocr_processor.monitor_index} "
+            f"🖥️  OCR enabled | monitor_index={ocr_processor.monitor_index} "
             f"interval={ocr_processor.check_interval}s"
         )
     else:
@@ -193,12 +193,6 @@ async def websocket_endpoint(ws: WebSocket):
             audio_np = np.array(buffer, dtype=np.float32)[:CHUNK_SIZE]
             current_volume = float(np.sqrt(np.mean(audio_np**2)))
 
-            if current_volume > 0.0005:
-                print(
-                    f"🔊 [DEBUG] Mic Volume: {current_volume:.5f} "
-                    f"(Required: > {SILENCE_RMS_THRESHOLD})"
-                )
-
             if current_volume <= SILENCE_RMS_THRESHOLD:
                 for _ in range(min(CHUNK_SIZE // 4, len(buffer))):
                     try:
@@ -216,7 +210,6 @@ async def websocket_endpoint(ws: WebSocket):
                 )
 
             try:
-                print("🧠 [DEBUG] Sending to Whisper for processing...")
                 result = await loop.run_in_executor(None, _transcribe)
             except Exception as transcribe_err:
                 print(f"⚠️ Whisper error: {transcribe_err}")
@@ -240,12 +233,6 @@ async def websocket_endpoint(ws: WebSocket):
             )
             analysis["ocr"] = ocr_result
             analysis["meeting_id"] = active_meeting_id
-
-            print(
-                f"📤 Broadcasting text='{text[:60]}' | "
-                f"ocr_len={len(ocr_result['text'])} "
-                f"ocr_keywords={ocr_result['keywords'][:3]}"
-            )
 
             try:
                 await db_queue.put(

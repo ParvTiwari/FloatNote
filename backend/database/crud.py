@@ -161,7 +161,6 @@ async def save_to_database(data: dict, meeting_id: int | None = None):
                 session.add(new_action)
 
             await session.commit()
-            print(f"✅ 💾 SAVED TO DB: [{speaker_label}] {data.get('text', '')[:30]}...")
 
         except Exception as e:
             await session.rollback()
