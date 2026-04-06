@@ -1,4 +1,5 @@
 import os
+import re
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
@@ -10,6 +11,8 @@ load_dotenv()
 
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+USE_FAISS = os.getenv("CHATBOT_USE_FAISS", "false").strip().lower() == "true"
+USE_HF_LLM = os.getenv("CHATBOT_USE_HF_LLM", "false").strip().lower() == "true"
 
 import warnings
 warnings.filterwarnings(
@@ -55,15 +58,61 @@ def convert_to_documents(all_data):
     return docs
 
 
+def _tokenize(text):
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+class _SimpleRetriever:
+    def __init__(self, docs, k=4):
+        self.docs = docs
+        self.k = k
+
+    def invoke(self, query):
+        query_tokens = set(_tokenize(query))
+        if not query_tokens:
+            return self.docs[: self.k]
+
+        scored = []
+        for doc in self.docs:
+            doc_tokens = set(_tokenize(doc.page_content))
+            overlap = len(query_tokens.intersection(doc_tokens))
+            if overlap > 0:
+                scored.append((overlap, doc))
+
+        if scored:
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            return [doc for _, doc in scored[: self.k]]
+        return self.docs[: self.k]
+
+
+class _SimpleVectorStore:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def as_retriever(self, search_kwargs=None):
+        search_kwargs = search_kwargs or {}
+        k = int(search_kwargs.get("k", 4))
+        return _SimpleRetriever(self.docs, k=k)
+
+
 def create_vector_store(docs):
     if not docs:
         raise ValueError("No meeting documents are available for chatbot search.")
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    return FAISS.from_documents(docs, embeddings)
+    if not USE_FAISS:
+        return _SimpleVectorStore(docs)
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+        return FAISS.from_documents(docs, embeddings)
+    except Exception as exc:
+        print(f"Chatbot retrieval fallback active (embedding error): {exc}")
+        return _SimpleVectorStore(docs)
 
 
 def get_llm():
     from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+
+    if not USE_HF_LLM:
+        raise ValueError("CHATBOT_USE_HF_LLM is disabled.")
 
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
     model_name = os.getenv("HUGGINGFACE_CHAT_MODEL", DEFAULT_CHAT_MODEL)
@@ -116,6 +165,23 @@ def ask_question(query, vector_db):
         ),
     ]
 
-    llm = get_llm()
-    response = llm.invoke(messages)
-    return response.content.strip()
+    try:
+        llm = get_llm()
+        response = llm.invoke(messages)
+        content = getattr(response, "content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                for chunk in content
+            )
+        final = str(content).strip()
+        if final:
+            return final
+    except Exception as exc:
+        print(f"Chatbot generation fallback active (LLM error): {exc}")
+
+    snippets = [doc.page_content.strip() for doc in docs if doc.page_content.strip()]
+    if not snippets:
+        return "I could not find anything relevant in the meeting data."
+    top_lines = snippets[:2]
+    return "I could not reach the chat model, so here is the closest meeting context:\n- " + "\n- ".join(top_lines)
