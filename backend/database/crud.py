@@ -1,5 +1,10 @@
 from sqlalchemy import select
 from .models import AsyncSessionLocal, Meeting, Transcript, ActionItem, engine, Base
+from ai_modules.utils.meeting_content import (
+    clean_meeting_text,
+    is_useful_audio_text,
+    is_useful_ocr_text,
+)
 
 async def init_db():
     async with engine.begin() as conn:
@@ -39,6 +44,19 @@ def _split_keywords(raw_keywords: str | None) -> list[str]:
         return []
     return [keyword.strip() for keyword in raw_keywords.split(",") if keyword.strip()]
 
+
+def _filter_keywords_for_item(keywords: list[str], cleaned_text: str, source: str) -> list[str]:
+    if source != "ocr":
+        return keywords
+
+    lowered_text = cleaned_text.lower()
+    filtered = []
+    for keyword in keywords:
+        normalized = keyword.strip()
+        if normalized and normalized.lower() in lowered_text:
+            filtered.append(normalized)
+    return filtered
+
 async def get_meeting_data(meeting_id: int) -> dict | None:
     async with AsyncSessionLocal() as session:
         meeting = await session.get(Meeting, meeting_id)
@@ -64,12 +82,26 @@ async def get_meeting_data(meeting_id: int) -> dict | None:
 
         for transcript in transcripts:
             source = transcript.source or "unknown"
+            normalized_source = "ocr" if source.upper() == "OCR" else "audio"
+            cleaned_text = clean_meeting_text(transcript.text or "", normalized_source)
+
+            if normalized_source == "ocr" and not is_useful_ocr_text(transcript.text or ""):
+                continue
+            if normalized_source == "audio" and not is_useful_audio_text(transcript.text or ""):
+                continue
+            if not cleaned_text:
+                continue
+
             normalized_items.append(
                 {
-                    "source": "ocr" if source.upper() == "OCR" else "audio",
+                    "source": normalized_source,
                     "speaker": None if source.upper() == "OCR" else source,
-                    "text": transcript.text or "",
-                    "keywords": _split_keywords(transcript.keywords),
+                    "text": cleaned_text,
+                    "keywords": _filter_keywords_for_item(
+                        _split_keywords(transcript.keywords),
+                        cleaned_text,
+                        normalized_source,
+                    ),
                     "actions": [],
                 }
             )
