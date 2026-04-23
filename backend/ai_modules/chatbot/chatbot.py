@@ -18,11 +18,7 @@ from ai_modules.utils.meeting_content import (
 BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(BACKEND_ENV_PATH)
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_CHAT_MODEL = os.getenv(
-    "GROQ_CHAT_MODEL",
-    "llama-3.3-70b-versatile",
-)
+
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 USE_FAISS = os.getenv("CHATBOT_USE_FAISS", "false").strip().lower() == "true"
 QUESTION_STOPWORDS = {
@@ -61,7 +57,11 @@ QUESTION_STOPWORDS = {
     "who",
     "why",
 }
-
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_CHAT_MODEL = os.getenv(
+    "GROQ_CHAT_MODEL",
+    "llama-3.3-70b-versatile",
+)
 
 def _safe_str(value):
     if value is None:

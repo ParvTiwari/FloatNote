@@ -14,13 +14,13 @@ from ai_modules.utils.meeting_content import (
 BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(BACKEND_ENV_PATH)
 
+SUMMARY_CONTEXT_CHAR_LIMIT = 9000
+
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_GROQ_SUMMARY_MODEL = os.getenv(
     "GROQ_SUMMARY_MODEL",
     "llama-3.3-70b-versatile",
 )
-SUMMARY_CONTEXT_CHAR_LIMIT = 9000
-
 
 def _normalize_action(action):
     if isinstance(action, dict):
