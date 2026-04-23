@@ -20,6 +20,8 @@ function App() {
   const wsRef = useRef(null);
   const transcriptRef = useRef(null);
   const chatRef = useRef(null);
+  const summaryRequestInFlightRef = useRef(false);
+  const lastSummaryRefreshAtRef = useRef(0);
 
   useEffect(() => {
     if (transcriptRef.current) {
@@ -132,9 +134,18 @@ function App() {
     };
   }, []);
 
-  async function handleGenerateSummary() {
+  async function fetchSummary({ auto = false } = {}) {
+    if (summaryRequestInFlightRef.current) {
+      return;
+    }
+
+    summaryRequestInFlightRef.current = true;
     setSummaryLoading(true);
-    setSummaryStatus("Generating summary from saved meeting data...");
+    setSummaryStatus(
+      auto
+        ? "Refreshing summary from the latest saved meeting data..."
+        : "Generating summary from saved meeting data..."
+    );
 
     try {
       const endpoint = meetingId
@@ -148,20 +159,54 @@ function App() {
       }
 
       setSummary(data.summary || "");
+      lastSummaryRefreshAtRef.current = Date.now();
       setSummaryStatus(
         data.summary
-          ? `Summary ready for meeting #${data.meeting_id}.`
+          ? data.used_groq || data.summary_source === "groq"
+            ? `Summary ready for meeting #${data.meeting_id} via Groq${data.summary_model ? ` (${data.summary_model})` : ""}.`
+            : `Summary updated for meeting #${data.meeting_id} using fallback summarizer${data.summary_error ? `: ${data.summary_error}` : "."}`
           : "No summary text was returned."
       );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unexpected summary error.";
-      setSummary("");
+      if (!auto) {
+        setSummary("");
+      }
       setSummaryStatus(message);
     } finally {
+      summaryRequestInFlightRef.current = false;
       setSummaryLoading(false);
     }
   }
+
+  async function handleGenerateSummary() {
+    await fetchSummary({ auto: false });
+  }
+
+  useEffect(() => {
+    const hasMeetingContent =
+      transcript.length > 0 ||
+      actions.length > 0 ||
+      Boolean(ocr.text?.trim()) ||
+      Boolean(ocr._everReceived);
+
+    if (!meetingId || !hasMeetingContent) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      const elapsed = Date.now() - lastSummaryRefreshAtRef.current;
+      if (elapsed < 12000) {
+        return;
+      }
+      fetchSummary({ auto: true });
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [meetingId, transcript.length, actions.length, ocr.text, ocr._everReceived]);
 
   async function handleAskChatbot(event) {
     event.preventDefault();
@@ -226,6 +271,7 @@ function App() {
     setOcr({ text: "", keywords: [], _everReceived: false });
     setSummary("");
     setSummaryStatus("No summary generated yet.");
+    lastSummaryRefreshAtRef.current = 0;
     setChatQuestion("");
     setChatError("");
     setChatHistory([]);
@@ -449,8 +495,8 @@ function App() {
               <div className="mb-5">
                 <h3 className="text-2xl font-bold">💬 Meeting Chatbot</h3>
                 <p className="mt-2 text-sm leading-6 text-slate-300">
-                  Ask questions against the saved meeting transcript, OCR text,
-                  and action items.
+                  Ask questions against the latest saved meeting transcript,
+                  OCR text, and action items from the current meeting.
                 </p>
               </div>
 

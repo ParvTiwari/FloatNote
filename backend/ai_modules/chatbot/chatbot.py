@@ -1,81 +1,135 @@
 import os
 import re
-from collections import Counter
+from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from ai_modules.utils.meeting_content import (
     clean_meeting_text,
     is_useful_audio_text,
     is_useful_ocr_text,
 )
 
-load_dotenv()
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(BACKEND_ENV_PATH)
 
-DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_CHAT_MODEL = os.getenv(
+    "GROQ_CHAT_MODEL",
+    "llama-3.3-70b-versatile",
+)
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 USE_FAISS = os.getenv("CHATBOT_USE_FAISS", "false").strip().lower() == "true"
-USE_HF_LLM = os.getenv("CHATBOT_USE_HF_LLM", "false").strip().lower() == "true"
-OCR_QUERY_TERMS = {"ocr", "screen", "slide", "document", "page", "table", "tables", "screen text"}
-SUMMARY_QUERY_TERMS = {"summary", "summarize", "little summary", "brief", "overview", "short summary"}
+QUESTION_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "can",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "of",
+    "on",
+    "please",
+    "show",
+    "tell",
+    "the",
+    "there",
+    "these",
+    "this",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+}
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="`resume_download` is deprecated"
-)
+
+def _safe_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_action(action):
+    if isinstance(action, dict):
+        task = _safe_str(action.get("task"))
+        assignee = _safe_str(action.get("assignee"))
+        if task and assignee:
+            return f"{assignee}: {task}"
+        return task
+    return _safe_str(action)
+
 
 def convert_to_documents(all_data):
     docs = []
 
     for item in all_data:
-        content = ""
-        speaker = item.get("speaker")
-        source = item.get("source", "unknown")
-        raw_text = item.get("text", "").strip()
-        text = clean_meeting_text(raw_text, source)
+        source = _safe_str(item.get("source")) or "audio"
+        raw_text = _safe_str(item.get("text"))
+        cleaned_text = clean_meeting_text(raw_text, source)
 
-        if not text:
+        if not cleaned_text:
             continue
         if source == "ocr" and not is_useful_ocr_text(raw_text):
             continue
         if source != "ocr" and not is_useful_audio_text(raw_text):
             continue
 
-        if speaker:
-            content += f"{speaker}: "
-        else:
-            content += f"{source}: "
+        speaker = _safe_str(item.get("speaker"))
+        prefix = speaker or ("OCR" if source == "ocr" else "Speaker")
+        parts = [f"{prefix}: {cleaned_text}"]
 
-        content += text
+        keywords = [_safe_str(keyword) for keyword in item.get("keywords", []) if _safe_str(keyword)]
+        if keywords:
+            parts.append("Keywords: " + ", ".join(keywords))
 
-        if item.get("keywords"):
-            content += f"\nKeywords: {', '.join(item['keywords'])}"
-
-        actions = item.get("actions") or item.get("action_items") or []
+        actions = [_normalize_action(action) for action in (item.get("actions") or item.get("action_items") or [])]
+        actions = [action for action in actions if action]
         if actions:
-            formatted_actions = []
-            for action in actions:
-                if isinstance(action, dict):
-                    task = action.get("task", "Unknown Task")
-                    assignee = action.get("assignee")
-                    formatted_actions.append(
-                        f"{task} ({assignee})" if assignee else task
-                    )
-                else:
-                    formatted_actions.append(str(action))
-            content += f"\nActions: {', '.join(formatted_actions)}"
+            parts.append("Actions: " + ", ".join(actions))
 
-        docs.append(Document(page_content=content))
+        docs.append(
+            Document(
+                page_content="\n".join(parts),
+                metadata={
+                    "source": source,
+                    "speaker": speaker or None,
+                },
+            )
+        )
 
     return docs
 
 
 def _tokenize(text):
-    return re.findall(r"[a-z0-9]+", text.lower())
+    return re.findall(r"[a-z0-9]+", _safe_str(text).lower())
+
+
+def _significant_tokens(text):
+    return [
+        token
+        for token in _tokenize(text)
+        if token not in QUESTION_STOPWORDS and len(token) > 1
+    ]
 
 
 class _SimpleRetriever:
@@ -84,33 +138,33 @@ class _SimpleRetriever:
         self.k = k
 
     def invoke(self, query):
-        query_tokens = set(_tokenize(query))
-        query_lower = query.lower()
-        wants_ocr = any(term in query_lower for term in OCR_QUERY_TERMS)
+        query_tokens = set(_significant_tokens(query) or _tokenize(query))
         if not query_tokens:
             return self.docs[: self.k]
 
         scored = []
         for doc in self.docs:
+            lowered = doc.page_content.lower()
             doc_tokens = set(_tokenize(doc.page_content))
             overlap = len(query_tokens.intersection(doc_tokens))
-            if overlap > 0:
-                source_bonus = 0
-                lowered = doc.page_content.lower()
-                if lowered.startswith("ocr:"):
-                    source_bonus = 2 if wants_ocr else -1
-                else:
-                    source_bonus = 2
+            phrase_bonus = sum(2 for token in query_tokens if len(token) >= 4 and token in lowered)
+            structure_bonus = 0
+            if "keywords:" in lowered:
+                structure_bonus += 1
+            if "actions:" in lowered:
+                structure_bonus += 2
+            if lowered.startswith("ocr:") and "screen" in query.lower():
+                structure_bonus += 2
 
-                action_bonus = 1 if "actions:" in lowered and any(
-                    word in query_lower for word in ("action", "task", "todo", "follow up")
-                ) else 0
-                scored.append((overlap + source_bonus + action_bonus, doc))
+            score = overlap * 4 + phrase_bonus + structure_bonus
+            if score > 0:
+                scored.append((score, doc))
 
-        if scored:
-            scored.sort(key=lambda pair: pair[0], reverse=True)
-            return [doc for _, doc in scored[: self.k]]
-        return self.docs[: self.k]
+        if not scored:
+            return self.docs[: self.k]
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [doc for _, doc in scored[: self.k]]
 
 
 class _SimpleVectorStore:
@@ -123,176 +177,184 @@ class _SimpleVectorStore:
         return _SimpleRetriever(self.docs, k=k)
 
 
-def create_vector_store(docs):
+def _split_documents(docs):
     if not docs:
+        return []
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=700,
+        chunk_overlap=120,
+    )
+    return splitter.split_documents(docs)
+
+
+def create_vector_store(docs):
+    chunks = _split_documents(docs)
+    if not chunks:
         return _SimpleVectorStore([])
+
     if not USE_FAISS:
-        return _SimpleVectorStore(docs)
+        return _SimpleVectorStore(chunks)
+
     try:
         embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-        return FAISS.from_documents(docs, embeddings)
+        return FAISS.from_documents(chunks, embeddings)
     except Exception as exc:
-        print(f"Chatbot retrieval fallback active (embedding error): {exc}")
-        return _SimpleVectorStore(docs)
+        print(f"FAISS fallback active: {exc}")
+        return _SimpleVectorStore(chunks)
 
 
-def get_llm():
-    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+def _call_groq(messages, model, temperature=0.1, max_completion_tokens=500):
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is not set in backend/.env")
 
-    if not USE_HF_LLM:
-        raise ValueError("CHATBOT_USE_HF_LLM is disabled.")
+    response = requests.post(
+        GROQ_API_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_completion_tokens": max_completion_tokens,
+        },
+        timeout=60,
+    )
+    if not response.ok:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
 
-    token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-    model_name = os.getenv("HUGGINGFACE_CHAT_MODEL", DEFAULT_CHAT_MODEL)
+        error_info = payload.get("error", {}) if isinstance(payload, dict) else {}
+        error_code = _safe_str(error_info.get("code"))
+        error_message = _safe_str(error_info.get("message"))
 
-    if not token:
-        raise ValueError("HUGGINGFACEHUB_API_TOKEN is missing in backend/.env")
+        if error_code == "expired_api_key":
+            raise ValueError("Groq API key has expired. Update GROQ_API_KEY in backend/.env.")
+        if response.status_code == 401:
+            raise ValueError(error_message or "Groq rejected the API key. Check GROQ_API_KEY in backend/.env.")
 
-    endpoint = HuggingFaceEndpoint(
-        repo_id=model_name,
-        task="text-generation",
-        huggingfacehub_api_token=token,
-        max_new_tokens=256,
-        temperature=0.2,
-        top_p=0.9,
-        do_sample=False,
-        return_full_text=False,
-        timeout=120,
+        response.raise_for_status()
+
+    payload = response.json()
+    return (
+        payload.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
     )
 
-    return ChatHuggingFace(llm=endpoint)
 
+def _extract_evidence_lines(docs, query, limit=6):
+    query_tokens = set(_significant_tokens(query) or _tokenize(query))
+    scored = []
 
-def _extract_actions(docs):
-    actions = []
-    for doc in docs:
-        for line in doc.page_content.splitlines():
-            if line.lower().startswith("actions:"):
-                for action in line.split(":", 1)[1].split(","):
-                    cleaned = action.strip(" -")
-                    if cleaned:
-                        actions.append(cleaned)
-    return list(dict.fromkeys(actions))
-
-
-def _extract_keywords(docs):
-    keywords = []
-    for doc in docs:
-        for line in doc.page_content.splitlines():
-            if line.lower().startswith("keywords:"):
-                for keyword in line.split(":", 1)[1].split(","):
-                    cleaned = keyword.strip(" -")
-                    if cleaned:
-                        keywords.append(cleaned)
-    return [kw for kw, _ in Counter(keywords).most_common(6)]
-
-
-def _fallback_answer(clean_query, docs):
-    if not docs:
-        return "I could not find anything relevant in the meeting data."
-
-    query_lower = clean_query.lower()
-    actions = _extract_actions(docs)
-
-    if any(term in query_lower for term in SUMMARY_QUERY_TERMS):
-        summary_lines = []
-        for doc in docs:
-            first_line = doc.page_content.splitlines()[0].strip()
-            if first_line.lower().startswith("ocr:"):
+    for doc_index, doc in enumerate(docs):
+        for line_index, raw_line in enumerate(doc.page_content.splitlines()):
+            line = raw_line.strip()
+            if not line:
                 continue
-            if first_line and first_line not in summary_lines:
-                summary_lines.append(first_line)
-            if len(summary_lines) == 2:
-                break
 
-        if not summary_lines:
-            for doc in docs:
-                first_line = doc.page_content.splitlines()[0].strip()
-                if first_line and first_line not in summary_lines:
-                    summary_lines.append(first_line)
-                if len(summary_lines) == 2:
-                    break
+            lowered = line.lower()
+            line_tokens = set(_tokenize(line))
+            overlap = len(query_tokens.intersection(line_tokens))
+            phrase_bonus = sum(2 for token in query_tokens if len(token) >= 4 and token in lowered)
+            score = overlap * 4 + phrase_bonus
 
-        if summary_lines:
-            cleaned = []
-            for line in summary_lines:
-                cleaned.append(re.sub(r"^[A-Za-z0-9_ ]+:\s*", "", line).strip())
-            return "Short summary: " + " ".join(cleaned[:2])
+            if lowered.startswith("actions:"):
+                score += 2
+            if lowered.startswith("keywords:"):
+                score += 1
 
-    if any(word in query_lower for word in ("action", "task", "todo", "follow up")) and actions:
-        return "Here are the action items I found:\n- " + "\n- ".join(actions[:6])
+            if score > 0:
+                scored.append((score, doc_index, line_index, line))
 
-    if any(word in query_lower for word in ("keyword", "topic", "theme")):
-        keywords = _extract_keywords(docs)
-        if keywords:
-            return "Main topics mentioned were: " + ", ".join(keywords) + "."
+    scored.sort(key=lambda item: (item[0], -item[1], -item[2]), reverse=True)
 
-    if any(word in query_lower for word in OCR_QUERY_TERMS):
-        ocr_lines = []
-        for doc in docs:
-            if doc.page_content.lower().startswith("ocr:"):
-                first_line = doc.page_content.splitlines()[0].replace("ocr:", "", 1).strip()
-                if first_line and first_line not in ocr_lines:
-                    ocr_lines.append(first_line)
-        if ocr_lines:
-            return "From the captured screen content, I found:\n- " + "\n- ".join(ocr_lines[:4])
-        # Fall through to general meeting context if OCR is unavailable but transcript text still matches.
+    evidence = []
+    seen = set()
+    for _, _, _, line in scored:
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence.append(line)
+        if len(evidence) >= limit:
+            break
 
-    top_lines = []
-    for doc in docs[:3]:
-        line = doc.page_content.splitlines()[0].strip()
-        if line and line not in top_lines:
-            top_lines.append(line)
+    return evidence
 
-    if not top_lines:
-        return "I found related meeting context, but it was too sparse to answer confidently."
 
-    return "Based on the meeting notes:\n- " + "\n- ".join(top_lines)
+def _format_context(docs, query):
+    evidence = _extract_evidence_lines(docs, query, limit=6)
+    if evidence:
+        return "\n".join(f"- {line}" for line in evidence)
+
+    blocks = []
+    seen = set()
+    for doc in docs:
+        content = doc.page_content.strip()
+        if not content or content in seen:
+            continue
+        seen.add(content)
+        blocks.append(content)
+        if len(blocks) >= 4:
+            break
+
+    return "\n\n".join(blocks)
+
+
+def _fallback_answer(query, docs):
+    del query
+    if not docs:
+        return "I could not find anything relevant in the current meeting data."
+    return "I could not answer from Groq right now. Please try again in a moment."
 
 
 def ask_question(query, vector_db):
-    clean_query = query.strip()
+    clean_query = _safe_str(query)
     if not clean_query:
         return "Please ask a question."
 
-    retriever = vector_db.as_retriever(search_kwargs={"k": 4})
+    retriever = vector_db.as_retriever(search_kwargs={"k": 5})
     docs = retriever.invoke(clean_query)
-
     if not docs:
-        return "I could not find anything relevant in the meeting data."
+        return "I could not find anything relevant in the current meeting data."
 
-    context = "\n\n".join(doc.page_content for doc in docs)
+    context = _format_context(docs, clean_query)
+    if not context:
+        return "I could not find anything relevant in the current meeting data."
+
+    model = DEFAULT_GROQ_CHAT_MODEL
     messages = [
-        SystemMessage(
-            content=(
-                "You are a meeting assistant. "
-                "Answer only from the provided context. "
-                "If the answer is not in the context, say that clearly. "
-                "Do not invent facts, do not ask follow-up questions, and keep the answer concise."
-            )
-        ),
-        HumanMessage(
-            content=(
-                f"Context:\n{context}\n\n"
+        {
+            "role": "system",
+            "content": (
+                "You are a meeting assistant built using a simple RAG pipeline: retrieve relevant meeting context, "
+                "inject it into the prompt, and answer only from that context. "
+                "Teach in a clear, beginner-friendly style similar to an educational explainer. "
+                "Do not use outside knowledge. "
+                "If the context is missing or insufficient, reply exactly: "
+                "'I could not find that in the current meeting data.' "
+                "Keep the answer concise, factual, and easy to understand."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Retrieved context from the current meeting:\n{context}\n\n"
                 f"Question: {clean_query}\n\n"
-                "Answer in 2 to 4 sentences."
-            )
-        ),
+                "Answer only from the retrieved context. If useful, synthesize the context into a short explanation."
+            ),
+        },
     ]
 
     try:
-        llm = get_llm()
-        response = llm.invoke(messages)
-        content = getattr(response, "content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
-                for chunk in content
-            )
-        final = str(content).strip()
-        if final:
-            return final
+        answer = _call_groq(messages, model=model)
+        return answer or "I could not find that in the current meeting data."
     except Exception as exc:
-        print(f"Chatbot generation fallback active (LLM error): {exc}")
-
-    return _fallback_answer(clean_query, docs)
+        print(f"Groq chatbot failed: {exc}")
+        return _fallback_answer(clean_query, docs)

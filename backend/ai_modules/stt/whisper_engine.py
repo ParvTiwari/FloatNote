@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ai_modules.chatbot.chatbot import ask_question, convert_to_documents, create_vector_store
-from ai_modules.summarizer.summarizer import summarize_meeting
+from ai_modules.summarizer.summarizer import summarize_meeting_result
 from database.crud import (
     create_new_meeting,
     get_latest_meeting_data,
@@ -52,6 +52,12 @@ active_meeting_id: int | None = None
 
 class ChatRequest(BaseModel):
     question: str
+
+
+async def wait_for_pending_meeting_writes():
+    if db_queue.qsize() > 0:
+        print(f"⏳ Waiting for {db_queue.qsize()} pending DB write(s) before answering...")
+    await db_queue.join()
 
 
 async def load_meeting_payload(meeting_id: int | None = None) -> dict:
@@ -270,30 +276,43 @@ async def websocket_endpoint(ws: WebSocket):
 
 @app.get("/meetings/latest/summary")
 async def get_latest_meeting_summary():
+    await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
-    summary = summarize_meeting(meeting_payload["items"])
-    await save_meeting_summary(meeting_payload["meeting_id"], summary)
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    await save_meeting_summary(meeting_payload["meeting_id"], summary_result["summary"])
     return {
         "meeting_id": meeting_payload["meeting_id"],
         "title": meeting_payload["title"],
-        "summary": summary,
+        "summary": summary_result["summary"],
+        "summary_source": summary_result["source"],
+        "summary_model": summary_result["model"],
+        "used_groq": summary_result["used_groq"],
+        "used_huggingface": summary_result["used_huggingface"],
+        "summary_error": summary_result["error"],
     }
 
 
 @app.get("/meetings/{meeting_id}/summary")
 async def get_meeting_summary(meeting_id: int):
+    await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
-    summary = summarize_meeting(meeting_payload["items"])
-    await save_meeting_summary(meeting_id, summary)
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    await save_meeting_summary(meeting_id, summary_result["summary"])
     return {
         "meeting_id": meeting_payload["meeting_id"],
         "title": meeting_payload["title"],
-        "summary": summary,
+        "summary": summary_result["summary"],
+        "summary_source": summary_result["source"],
+        "summary_model": summary_result["model"],
+        "used_groq": summary_result["used_groq"],
+        "used_huggingface": summary_result["used_huggingface"],
+        "summary_error": summary_result["error"],
     }
 
 
 @app.post("/meetings/latest/chat")
 async def chat_with_latest_meeting(request: ChatRequest):
+    await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
     docs = convert_to_documents(meeting_payload["items"])
     vector_db = create_vector_store(docs)
@@ -308,6 +327,7 @@ async def chat_with_latest_meeting(request: ChatRequest):
 
 @app.post("/meetings/{meeting_id}/chat")
 async def chat_with_meeting(meeting_id: int, request: ChatRequest):
+    await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
     docs = convert_to_documents(meeting_payload["items"])
     vector_db = create_vector_store(docs)

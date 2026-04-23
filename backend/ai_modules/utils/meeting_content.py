@@ -54,6 +54,16 @@ TRAILING_STOP_TOKENS = {
     "in",
     "on",
 }
+NOISE_PHRASES = {
+    "protected view",
+    "be careful",
+    "files from the internet can contain viruses",
+    "unless you need to edit",
+    "safer to stay in protected view",
+    "enable editing",
+    "security warning",
+    "read only",
+}
 
 
 def normalize_text(text: str) -> str:
@@ -98,6 +108,9 @@ def _is_meaningful_line(line: str) -> bool:
     if len(cleaned) < 8:
         return False
     if _has_too_many_symbols(cleaned):
+        return False
+    lowered_cleaned = cleaned.lower()
+    if any(phrase in lowered_cleaned for phrase in NOISE_PHRASES):
         return False
 
     tokens = _word_tokens(cleaned)
