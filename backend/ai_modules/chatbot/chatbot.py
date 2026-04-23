@@ -314,19 +314,43 @@ def _fallback_answer(query, docs):
     return "I could not answer from Groq right now. Please try again in a moment."
 
 
-def ask_question(query, vector_db):
+def ask_question_debug(query, vector_db):
     clean_query = _safe_str(query)
     if not clean_query:
-        return "Please ask a question."
+        return {
+            "question": clean_query,
+            "answer": "Please ask a question.",
+            "model": None,
+            "context": "",
+            "retrieved_documents": [],
+            "used_groq": False,
+            "error": None,
+        }
 
     retriever = vector_db.as_retriever(search_kwargs={"k": 5})
     docs = retriever.invoke(clean_query)
     if not docs:
-        return "I could not find anything relevant in the current meeting data."
+        return {
+            "question": clean_query,
+            "answer": "I could not find anything relevant in the current meeting data.",
+            "model": None,
+            "context": "",
+            "retrieved_documents": [],
+            "used_groq": False,
+            "error": None,
+        }
 
     context = _format_context(docs, clean_query)
     if not context:
-        return "I could not find anything relevant in the current meeting data."
+        return {
+            "question": clean_query,
+            "answer": "I could not find anything relevant in the current meeting data.",
+            "model": None,
+            "context": "",
+            "retrieved_documents": [doc.page_content for doc in docs],
+            "used_groq": False,
+            "error": None,
+        }
 
     model = DEFAULT_GROQ_CHAT_MODEL
     messages = [
@@ -354,7 +378,27 @@ def ask_question(query, vector_db):
 
     try:
         answer = _call_groq(messages, model=model)
-        return answer or "I could not find that in the current meeting data."
+        return {
+            "question": clean_query,
+            "answer": answer or "I could not find that in the current meeting data.",
+            "model": model,
+            "context": context,
+            "retrieved_documents": [doc.page_content for doc in docs],
+            "used_groq": True,
+            "error": None,
+        }
     except Exception as exc:
         print(f"Groq chatbot failed: {exc}")
-        return _fallback_answer(clean_query, docs)
+        return {
+            "question": clean_query,
+            "answer": _fallback_answer(clean_query, docs),
+            "model": model,
+            "context": context,
+            "retrieved_documents": [doc.page_content for doc in docs],
+            "used_groq": False,
+            "error": str(exc),
+        }
+
+
+def ask_question(query, vector_db):
+    return ask_question_debug(query, vector_db)["answer"]

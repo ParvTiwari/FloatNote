@@ -11,7 +11,6 @@ function App() {
   const [ocr, setOcr] = useState({ text: "", keywords: [] });
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [summary, setSummary] = useState("");
-  const [summaryStatus, setSummaryStatus] = useState("No summary generated yet.");
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [chatQuestion, setChatQuestion] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
@@ -21,7 +20,6 @@ function App() {
   const transcriptRef = useRef(null);
   const chatRef = useRef(null);
   const summaryRequestInFlightRef = useRef(false);
-  const lastSummaryRefreshAtRef = useRef(0);
 
   useEffect(() => {
     if (transcriptRef.current) {
@@ -134,18 +132,13 @@ function App() {
     };
   }, []);
 
-  async function fetchSummary({ auto = false } = {}) {
+  async function fetchSummary() {
     if (summaryRequestInFlightRef.current) {
       return;
     }
 
     summaryRequestInFlightRef.current = true;
     setSummaryLoading(true);
-    setSummaryStatus(
-      auto
-        ? "Refreshing summary from the latest saved meeting data..."
-        : "Generating summary from saved meeting data..."
-    );
 
     try {
       const endpoint = meetingId
@@ -159,21 +152,11 @@ function App() {
       }
 
       setSummary(data.summary || "");
-      lastSummaryRefreshAtRef.current = Date.now();
-      setSummaryStatus(
-        data.summary
-          ? data.used_groq || data.summary_source === "groq"
-            ? `Summary ready for meeting #${data.meeting_id} via Groq${data.summary_model ? ` (${data.summary_model})` : ""}.`
-            : `Summary updated for meeting #${data.meeting_id} using fallback summarizer${data.summary_error ? `: ${data.summary_error}` : "."}`
-          : "No summary text was returned."
-      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unexpected summary error.";
-      if (!auto) {
-        setSummary("");
-      }
-      setSummaryStatus(message);
+      setSummary("");
+      console.error("Summary error:", message);
     } finally {
       summaryRequestInFlightRef.current = false;
       setSummaryLoading(false);
@@ -181,32 +164,8 @@ function App() {
   }
 
   async function handleGenerateSummary() {
-    await fetchSummary({ auto: false });
+    await fetchSummary();
   }
-
-  useEffect(() => {
-    const hasMeetingContent =
-      transcript.length > 0 ||
-      actions.length > 0 ||
-      Boolean(ocr.text?.trim()) ||
-      Boolean(ocr._everReceived);
-
-    if (!meetingId || !hasMeetingContent) {
-      return undefined;
-    }
-
-    const intervalId = window.setInterval(() => {
-      const elapsed = Date.now() - lastSummaryRefreshAtRef.current;
-      if (elapsed < 12000) {
-        return;
-      }
-      fetchSummary({ auto: true });
-    }, 15000);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [meetingId, transcript.length, actions.length, ocr.text, ocr._everReceived]);
 
   async function handleAskChatbot(event) {
     event.preventDefault();
@@ -270,8 +229,6 @@ function App() {
     setActions([]);
     setOcr({ text: "", keywords: [], _everReceived: false });
     setSummary("");
-    setSummaryStatus("No summary generated yet.");
-    lastSummaryRefreshAtRef.current = 0;
     setChatQuestion("");
     setChatError("");
     setChatHistory([]);
@@ -418,10 +375,6 @@ function App() {
                   >
                     {summaryLoading ? "Generating..." : "Generate Summary"}
                   </button>
-                </div>
-
-                <div className="mb-4 rounded-2xl bg-sky-50 px-4 py-3 text-left text-sm font-medium text-sky-800">
-                  {summaryStatus}
                 </div>
 
                 <div className="h-[220px] overflow-y-auto rounded-[1.5rem] border border-slate-200 bg-white p-5 text-left shadow-inner">

@@ -1,8 +1,11 @@
 import asyncio
+import json
 import os
 import sys
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -11,7 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from ai_modules.chatbot.chatbot import ask_question, convert_to_documents, create_vector_store
+from ai_modules.chatbot.chatbot import ask_question, ask_question_debug, convert_to_documents, create_vector_store
 from ai_modules.summarizer.summarizer import summarize_meeting_result
 from database.crud import (
     create_new_meeting,
@@ -48,6 +51,7 @@ queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 buffer: deque = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
 db_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 active_meeting_id: int | None = None
+DEBUG_EXPORT_DIR = Path(__file__).resolve().parents[2] / "debug_exports"
 
 
 class ChatRequest(BaseModel):
@@ -71,6 +75,31 @@ async def load_meeting_payload(meeting_id: int | None = None) -> dict:
     if not meeting_payload["items"]:
         raise HTTPException(status_code=400, detail="Meeting has no captured data yet.")
     return meeting_payload
+
+
+def _write_debug_export(meeting_id: int, kind: str, payload: dict) -> str:
+    DEBUG_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = DEBUG_EXPORT_DIR / f"meeting_{meeting_id}_{kind}_{timestamp}.json"
+    file_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return str(file_path)
+
+
+def _build_meeting_debug_payload(meeting_payload: dict) -> dict:
+    docs = convert_to_documents(meeting_payload["items"])
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "saved_summary": meeting_payload.get("summary"),
+        "fresh_summary_result": summary_result,
+        "captured_items": meeting_payload["items"],
+        "document_count": len(docs),
+        "documents": [doc.page_content for doc in docs],
+    }
 
 
 async def database_worker_loop():
@@ -337,6 +366,96 @@ async def chat_with_meeting(meeting_id: int, request: ChatRequest):
         "title": meeting_payload["title"],
         "question": request.question,
         "answer": answer,
+    }
+
+
+@app.get("/meetings/latest/debug/export")
+async def export_latest_meeting_debug():
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    debug_payload = _build_meeting_debug_payload(meeting_payload)
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "snapshot",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        "debug": debug_payload,
+    }
+
+
+@app.get("/meetings/{meeting_id}/debug/export")
+async def export_meeting_debug(meeting_id: int):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    debug_payload = _build_meeting_debug_payload(meeting_payload)
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "snapshot",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        "debug": debug_payload,
+    }
+
+
+@app.post("/meetings/latest/chat/debug")
+async def chat_with_latest_meeting_debug(request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    chat_debug = ask_question_debug(request.question, vector_db)
+    debug_payload = {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "captured_items": meeting_payload["items"],
+        "documents": [doc.page_content for doc in docs],
+        "chat_debug": chat_debug,
+    }
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "chat_debug",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        **chat_debug,
+    }
+
+
+@app.post("/meetings/{meeting_id}/chat/debug")
+async def chat_with_meeting_debug(meeting_id: int, request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    chat_debug = ask_question_debug(request.question, vector_db)
+    debug_payload = {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "captured_items": meeting_payload["items"],
+        "documents": [doc.page_content for doc in docs],
+        "chat_debug": chat_debug,
+    }
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "chat_debug",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        **chat_debug,
     }
 
 
