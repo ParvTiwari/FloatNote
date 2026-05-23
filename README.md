@@ -70,6 +70,8 @@ cd FloatNote
 ### 2. Install Python dependencies
 
 ```bash
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r backend/requirements.txt
 ```
 
@@ -107,6 +109,7 @@ GROQ_API_KEY=gsk_...
 ### 5. Start the backend
 
 ```bash
+.\.venv\Scripts\Activate.ps1
 python backend/main.py
 ```
 
