@@ -1,15 +1,28 @@
 import asyncio
+import json
 import os
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 import whisper
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from database.crud import create_new_meeting, init_db, save_to_database
+from ai_modules.chatbot.chatbot import ask_question, ask_question_debug, convert_to_documents, create_vector_store
+from ai_modules.summarizer.summarizer import summarize_meeting_result
+from database.crud import (
+    create_new_meeting,
+    get_latest_meeting_data,
+    get_meeting_data,
+    init_db,
+    save_meeting_summary,
+    save_to_database,
+)
 
 from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
@@ -35,6 +48,55 @@ queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 buffer: deque = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
 db_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 active_meeting_id: int | None = None
+DEBUG_EXPORT_DIR = Path(__file__).resolve().parents[2] / "debug_exports"
+
+
+class ChatRequest(BaseModel):
+    question: str
+
+
+async def wait_for_pending_meeting_writes():
+    if db_queue.qsize() > 0:
+        print(f"⏳ Waiting for {db_queue.qsize()} pending DB write(s) before answering...")
+    await db_queue.join()
+
+
+async def load_meeting_payload(meeting_id: int | None = None) -> dict:
+    meeting_payload = (
+        await get_meeting_data(meeting_id)
+        if meeting_id is not None
+        else await get_latest_meeting_data()
+    )
+    if meeting_payload is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    if not meeting_payload["items"]:
+        raise HTTPException(status_code=400, detail="Meeting has no captured data yet.")
+    return meeting_payload
+
+
+def _write_debug_export(meeting_id: int, kind: str, payload: dict) -> str:
+    DEBUG_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = DEBUG_EXPORT_DIR / f"meeting_{meeting_id}_{kind}_{timestamp}.json"
+    file_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return str(file_path)
+
+
+def _build_meeting_debug_payload(meeting_payload: dict) -> dict:
+    docs = convert_to_documents(meeting_payload["items"])
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "saved_summary": meeting_payload.get("summary"),
+        "fresh_summary_result": summary_result,
+        "captured_items": meeting_payload["items"],
+        "document_count": len(docs),
+        "documents": [doc.page_content for doc in docs],
+    }
 
 
 async def database_worker_loop():
@@ -55,7 +117,7 @@ async def database_worker_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    print("🗄️ Database initialized")
+    print("🗄️  Database initialized")
     global loop, stream, ocr_processor
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
@@ -72,7 +134,7 @@ async def lifespan(app: FastAPI):
             change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
         )
         print(
-            f"🖥️ OCR enabled | monitor_index={ocr_processor.monitor_index} "
+            f"🖥️  OCR enabled | monitor_index={ocr_processor.monitor_index} "
             f"interval={ocr_processor.check_interval}s"
         )
     else:
@@ -163,12 +225,6 @@ async def websocket_endpoint(ws: WebSocket):
             audio_np = np.array(buffer, dtype=np.float32)[:CHUNK_SIZE]
             current_volume = float(np.sqrt(np.mean(audio_np**2)))
 
-            if current_volume > 0.0005:
-                print(
-                    f"🔊 [DEBUG] Mic Volume: {current_volume:.5f} "
-                    f"(Required: > {SILENCE_RMS_THRESHOLD})"
-                )
-
             if current_volume <= SILENCE_RMS_THRESHOLD:
                 for _ in range(min(CHUNK_SIZE // 4, len(buffer))):
                     try:
@@ -186,7 +242,6 @@ async def websocket_endpoint(ws: WebSocket):
                 )
 
             try:
-                print("🧠 [DEBUG] Sending to Whisper for processing...")
                 result = await loop.run_in_executor(None, _transcribe)
             except Exception as transcribe_err:
                 print(f"⚠️ Whisper error: {transcribe_err}")
@@ -210,12 +265,6 @@ async def websocket_endpoint(ws: WebSocket):
             )
             analysis["ocr"] = ocr_result
             analysis["meeting_id"] = active_meeting_id
-
-            print(
-                f"📤 Broadcasting text='{text[:60]}' | "
-                f"ocr_len={len(ocr_result['text'])} "
-                f"ocr_keywords={ocr_result['keywords'][:3]}"
-            )
 
             try:
                 await db_queue.put(
@@ -249,6 +298,162 @@ async def websocket_endpoint(ws: WebSocket):
             active_meeting_id = None
             print("🔁 Active meeting closed. Next connection will create a new meeting.")
         print(f"🔴 Client disconnected. Active: {len(clients)}")
+
+
+@app.get("/meetings/latest/summary")
+async def get_latest_meeting_summary():
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    await save_meeting_summary(meeting_payload["meeting_id"], summary_result["summary"])
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "summary": summary_result["summary"],
+        "summary_source": summary_result["source"],
+        "summary_model": summary_result["model"],
+        "used_groq": summary_result["used_groq"],
+        "used_huggingface": summary_result["used_huggingface"],
+        "summary_error": summary_result["error"],
+    }
+
+
+@app.get("/meetings/{meeting_id}/summary")
+async def get_meeting_summary(meeting_id: int):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    summary_result = summarize_meeting_result(meeting_payload["items"])
+    await save_meeting_summary(meeting_id, summary_result["summary"])
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "summary": summary_result["summary"],
+        "summary_source": summary_result["source"],
+        "summary_model": summary_result["model"],
+        "used_groq": summary_result["used_groq"],
+        "used_huggingface": summary_result["used_huggingface"],
+        "summary_error": summary_result["error"],
+    }
+
+
+@app.post("/meetings/latest/chat")
+async def chat_with_latest_meeting(request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    answer = ask_question(request.question, vector_db)
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "question": request.question,
+        "answer": answer,
+    }
+
+
+@app.post("/meetings/{meeting_id}/chat")
+async def chat_with_meeting(meeting_id: int, request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    answer = ask_question(request.question, vector_db)
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "question": request.question,
+        "answer": answer,
+    }
+
+
+@app.get("/meetings/latest/debug/export")
+async def export_latest_meeting_debug():
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    debug_payload = _build_meeting_debug_payload(meeting_payload)
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "snapshot",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        "debug": debug_payload,
+    }
+
+
+@app.get("/meetings/{meeting_id}/debug/export")
+async def export_meeting_debug(meeting_id: int):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    debug_payload = _build_meeting_debug_payload(meeting_payload)
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "snapshot",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        "debug": debug_payload,
+    }
+
+
+@app.post("/meetings/latest/chat/debug")
+async def chat_with_latest_meeting_debug(request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload()
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    chat_debug = ask_question_debug(request.question, vector_db)
+    debug_payload = {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "captured_items": meeting_payload["items"],
+        "documents": [doc.page_content for doc in docs],
+        "chat_debug": chat_debug,
+    }
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "chat_debug",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        **chat_debug,
+    }
+
+
+@app.post("/meetings/{meeting_id}/chat/debug")
+async def chat_with_meeting_debug(meeting_id: int, request: ChatRequest):
+    await wait_for_pending_meeting_writes()
+    meeting_payload = await load_meeting_payload(meeting_id)
+    docs = convert_to_documents(meeting_payload["items"])
+    vector_db = create_vector_store(docs)
+    chat_debug = ask_question_debug(request.question, vector_db)
+    debug_payload = {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "captured_items": meeting_payload["items"],
+        "documents": [doc.page_content for doc in docs],
+        "chat_debug": chat_debug,
+    }
+    export_path = _write_debug_export(
+        meeting_payload["meeting_id"],
+        "chat_debug",
+        debug_payload,
+    )
+    return {
+        "meeting_id": meeting_payload["meeting_id"],
+        "title": meeting_payload["title"],
+        "export_path": export_path,
+        **chat_debug,
+    }
 
 
 async def ping_client(ws: WebSocket):

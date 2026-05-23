@@ -1,13 +1,25 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const WS_BASE_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
 
 function App() {
+  const [meetingId, setMeetingId] = useState(null);
   const [transcript, setTranscript] = useState([]);
   const [keywords, setKeywords] = useState([]);
   const [actions, setActions] = useState([]);
   const [ocr, setOcr] = useState({ text: "", keywords: [] });
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
+  const [summary, setSummary] = useState("");
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [chatQuestion, setChatQuestion] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [chatHistory, setChatHistory] = useState([]);
   const wsRef = useRef(null);
   const transcriptRef = useRef(null);
+  const chatRef = useRef(null);
+  const summaryRequestInFlightRef = useRef(false);
 
   useEffect(() => {
     if (transcriptRef.current) {
@@ -20,7 +32,16 @@ function App() {
   }, [transcript]);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8000/ws");
+    if (chatRef.current) {
+      chatRef.current.scrollTo({
+        top: chatRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }
+  }, [chatHistory, chatLoading]);
+
+  useEffect(() => {
+    const ws = new WebSocket(WS_BASE_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -33,23 +54,34 @@ function App() {
         const data = JSON.parse(event.data);
 
         if (data.type === "connected") {
-          setConnectionStatus("🟢 Backend Ready");
+          setMeetingId(data.meeting_id ?? null);
+          setConnectionStatus("🟢 Connected");
           return;
         }
 
         if (data.type === "ocr") {
           const incoming = data.ocr;
           if (incoming?.text?.trim().length > 0) {
-            setOcr({ text: incoming.text, keywords: incoming.keywords || [], _everReceived: true });
+            setOcr({
+              text: incoming.text,
+              keywords: incoming.keywords || [],
+              _everReceived: true,
+            });
           } else {
-            setOcr(prev => ({ ...prev, _everReceived: true }));
+            setOcr((prev) => ({ ...prev, _everReceived: true }));
           }
           return;
         }
 
         const analysis = data;
 
-        setTranscript((prev) => [...prev, analysis.text]);
+        if (analysis.meeting_id) {
+          setMeetingId(analysis.meeting_id);
+        }
+
+        if (analysis.text?.trim()) {
+          setTranscript((prev) => [...prev, analysis.text]);
+        }
 
         setKeywords((prev) => {
           const allKeywords = [...prev, ...(analysis.keywords || [])];
@@ -58,13 +90,12 @@ function App() {
 
         if (analysis.actions && analysis.actions.length > 0) {
           setActions((prev) => {
-            const newActions = analysis.actions.filter(
-              (action) =>
-                !prev.some((existing) =>
-                  existing.includes(action.split(" → ")[1])
-                )
-            );
-            return [...prev, ...newActions];
+            const normalizedExisting = prev.map((item) => item.toLowerCase());
+            const nextActions = analysis.actions.filter((action) => {
+              const normalizedAction = String(action).toLowerCase();
+              return !normalizedExisting.includes(normalizedAction);
+            });
+            return [...prev, ...nextActions];
           });
         }
 
@@ -101,205 +132,416 @@ function App() {
     };
   }, []);
 
+  async function fetchSummary() {
+    if (summaryRequestInFlightRef.current) {
+      return;
+    }
+
+    summaryRequestInFlightRef.current = true;
+    setSummaryLoading(true);
+
+    try {
+      const endpoint = meetingId
+        ? `${API_BASE_URL}/meetings/${meetingId}/summary`
+        : `${API_BASE_URL}/meetings/latest/summary`;
+      const response = await fetch(endpoint);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to generate summary.");
+      }
+
+      setSummary(data.summary || "");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected summary error.";
+      setSummary("");
+      console.error("Summary error:", message);
+    } finally {
+      summaryRequestInFlightRef.current = false;
+      setSummaryLoading(false);
+    }
+  }
+
+  async function handleGenerateSummary() {
+    await fetchSummary();
+  }
+
+  async function handleAskChatbot(event) {
+    event.preventDefault();
+
+    const question = chatQuestion.trim();
+    if (!question) {
+      setChatError("Type a question first.");
+      return;
+    }
+
+    setChatLoading(true);
+    setChatError("");
+
+    const nextMessage = { role: "user", text: question };
+    setChatHistory((prev) => [...prev, nextMessage]);
+    setChatQuestion("");
+
+    try {
+      const endpoint = meetingId
+        ? `${API_BASE_URL}/meetings/${meetingId}/chat`
+        : `${API_BASE_URL}/meetings/latest/chat`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ question }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to get chatbot response.");
+      }
+
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: data.answer || "No answer returned.",
+        },
+      ]);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected chatbot error.";
+      setChatError(message);
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: `Error: ${message}`,
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
   const clearAll = () => {
     setTranscript([]);
     setKeywords([]);
     setActions([]);
+    setOcr({ text: "", keywords: [], _everReceived: false });
+    setSummary("");
+    setChatQuestion("");
+    setChatError("");
+    setChatHistory([]);
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 p-8">
-      {/* Header */}
-      <div className="max-w-7xl mx-auto mb-8">
-        <div className="flex items-center justify-between mb-4">
-          <h1 className="text-4xl font-black bg-gradient-to-r from-blue-600 to-purple-700 bg-clip-text text-transparent">
-            🎤 FloatNote AI
-          </h1>
-          <div className="flex items-center gap-4 text-sm">
-            <span
-              className={`px-3 py-1 rounded-full font-medium ${
-                connectionStatus.includes("Connected")
-                  ? "bg-green-100 text-green-800"
-                  : connectionStatus.includes("Error")
-                  ? "bg-red-100 text-red-800"
-                  : "bg-yellow-100 text-yellow-800"
-              }`}
-            >
-              {connectionStatus}
-            </span>
-            <span className="text-gray-500">2.5s latency</span>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#fef3c7_0%,_#fff7ed_28%,_#e0f2fe_64%,_#dbeafe_100%)] p-6 md:p-8">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-8 rounded-[2rem] border border-white/70 bg-white/70 p-6 shadow-[0_25px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.35em] text-sky-700">
+                Real-Time AI-Based Meeting Assistance System
+              </p>
+              <h1 className="font-serif text-4xl font-black tracking-tight text-slate-900 md:text-5xl">
+                FloatNote AI
+              </h1>
+              <p className="mt-3 max-w-2xl text-base leading-7 text-slate-600 md:text-lg">
+                Live transcript, OCR capture, meeting summary, and grounded
+                chatbot answers from the same saved meeting stream.
+              </p>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl bg-slate-950 px-4 py-3 text-left text-white shadow-lg">
+                <p className="text-xs uppercase tracking-[0.25em] text-slate-400">
+                  Connection
+                </p>
+                <p className="mt-2 text-sm font-semibold">{connectionStatus}</p>
+              </div>
+              <div className="rounded-2xl bg-amber-100/80 px-4 py-3 text-left text-amber-950 shadow-lg">
+                <p className="text-xs uppercase tracking-[0.25em] text-amber-700">
+                  Meeting
+                </p>
+                <p className="mt-2 text-sm font-semibold">
+                  {meetingId ? `#${meetingId}` : "Waiting for first handshake"}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
-        <p className="text-xl text-gray-600">Real-Time AI-Based Meeting Assistance system</p>
-      </div>
 
-      <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-3 gap-8">
-        {/* Left: Transcript + OCR stacked */}
-        <div className="xl:col-span-2 space-y-6">
-
-          {/* Live Transcript */}
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-8 shadow-2xl border border-white/50">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold flex items-center gap-3">
-                📝 Live Transcript
-                <span className="px-3 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded-full">
-                  LIVE
+        <div className="grid grid-cols-1 gap-8 xl:grid-cols-[1.5fr_0.9fr]">
+          <div className="space-y-8">
+            <section className="rounded-[2rem] border border-white/70 bg-white/75 p-7 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+              <div className="mb-6 flex items-center justify-between">
+                <h2 className="text-2xl font-bold text-slate-900">
+                  📝 Live Transcript
+                </h2>
+                <span className="rounded-full bg-sky-100 px-4 py-1 text-sm font-semibold text-sky-700">
+                  LIVE STREAM
                 </span>
-              </h2>
-            </div>
-            <div
-              ref={transcriptRef}
-              className="h-[360px] overflow-y-auto space-y-3 pr-2"
-            >
-              {transcript.map((text, index) => (
-                <div
-                  key={index}
-                  className="p-4 bg-gradient-to-r from-gray-50 to-gray-100 rounded-2xl
-                             hover:shadow-md transition-all border-l-4 border-blue-200"
-                >
-                  <p className="text-gray-800 leading-relaxed">{text}</p>
-                </div>
-              ))}
-              {transcript.length === 0 && (
-                <div className="h-full flex items-center justify-center text-gray-400">
-                  <div className="text-center">
-                    <div className="w-16 h-16 border-4 border-dashed border-gray-300 rounded-full animate-spin mx-auto mb-4" />
-                    <p>Speaking into microphone...</p>
+              </div>
+
+              <div
+                ref={transcriptRef}
+                className="h-[360px] space-y-3 overflow-y-auto pr-2"
+              >
+                {transcript.map((text, index) => (
+                  <div
+                    key={`${text}-${index}`}
+                    className="rounded-[1.5rem] border-l-4 border-sky-300 bg-gradient-to-r from-slate-50 to-sky-50 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+                  >
+                    <p className="text-left leading-7 text-slate-700">{text}</p>
                   </div>
+                ))}
+
+                {transcript.length === 0 && (
+                  <div className="flex h-full items-center justify-center text-slate-400">
+                    <div className="text-center">
+                      <div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-dashed border-slate-300" />
+                      <p className="text-lg font-medium">
+                        Listening for live speech...
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+              <div className="rounded-[2rem] border border-white/70 bg-white/75 p-7 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+                <div className="mb-5 flex items-center justify-between">
+                  <h2 className="text-2xl font-bold text-slate-900">
+                    🖥️ Screen Reader
+                  </h2>
+                  <span
+                    className={`rounded-full px-4 py-1 text-sm font-semibold ${
+                      ocr.text
+                        ? "bg-emerald-100 text-emerald-700"
+                        : ocr._everReceived
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-slate-100 text-slate-500"
+                    }`}
+                  >
+                    {ocr.text ? "ACTIVE" : ocr._everReceived ? "IDLE" : "DISABLED"}
+                  </span>
                 </div>
-              )}
-            </div>
-          </div>
 
-          {/* OCR Screen Reader */}
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-8 shadow-2xl border border-white/50">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold flex items-center gap-3">
-                🖥️ Screen Reader
-                <span
-                  className={`px-3 py-1 text-sm font-medium rounded-full ${
-                    ocr.text
-                      ? "bg-emerald-100 text-emerald-800"
-                      : ocr._everReceived
-                      ? "bg-yellow-100 text-yellow-800"
-                      : "bg-gray-100 text-gray-500"
-                  }`}
-                >
-                  {ocr.text ? "ACTIVE" : ocr._everReceived ? "IDLE" : "DISABLED"}
-                </span>
-              </h2>
-            </div>
+                <div className="mb-4 h-[180px] overflow-y-auto rounded-[1.5rem] bg-slate-950 p-4 font-mono text-sm">
+                  {ocr.text ? (
+                    <pre className="whitespace-pre-wrap leading-7 text-emerald-400">
+                      {ocr.text}
+                    </pre>
+                  ) : (
+                    <p className="italic text-slate-500">
+                      No screen content detected. Keep a slide or visible content
+                      on screen while OCR is enabled.
+                    </p>
+                  )}
+                </div>
 
-            {/* OCR raw text */}
-            <div className="h-[160px] overflow-y-auto mb-4 p-4 bg-gray-900 rounded-2xl font-mono text-sm">
-              {ocr.text ? (
-                <pre className="text-emerald-400 whitespace-pre-wrap leading-relaxed">
-                  {ocr.text}
-                </pre>
-              ) : (
-                <p className="text-gray-500 italic">
-                  No screen content detected — make sure ENABLE_OCR=true and a
-                  slide is visible.
-                </p>
-              )}
-            </div>
+                {ocr.keywords.length > 0 && (
+                  <div>
+                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">
+                      Slide keywords
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {ocr.keywords.map((keyword, index) => (
+                        <span
+                          key={`${keyword}-${index}`}
+                          className="rounded-xl bg-gradient-to-r from-emerald-100 to-teal-100 px-3 py-1 text-sm font-semibold text-teal-800"
+                        >
+                          {keyword}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
 
-            {/* OCR keywords */}
-            {ocr.keywords.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                  Slide keywords
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {ocr.keywords.map((kw, i) => (
-                    <span
-                      key={i}
-                      className="bg-gradient-to-r from-emerald-100 to-teal-100 text-teal-800
-                                 px-3 py-1 rounded-xl text-sm font-medium"
-                    >
-                      {kw}
-                    </span>
-                  ))}
+              <div className="rounded-[2rem] border border-white/70 bg-white/75 p-7 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+                <div className="mb-5 flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-2xl font-bold text-slate-900">
+                      🧠 Meeting Summary
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGenerateSummary}
+                    disabled={summaryLoading}
+                    className="rounded-2xl bg-gradient-to-r from-sky-600 to-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {summaryLoading ? "Generating..." : "Generate Summary"}
+                  </button>
+                </div>
+
+                <div className="h-[220px] overflow-y-auto rounded-[1.5rem] border border-slate-200 bg-white p-5 text-left shadow-inner">
+                  {summary ? (
+                    <pre className="whitespace-pre-wrap font-sans leading-7 text-slate-700">
+                      {summary}
+                    </pre>
+                  ) : (
+                    <p className="text-slate-400">
+                      Generate a meeting summary after real transcript data has
+                      been saved.
+                    </p>
+                  )}
                 </div>
               </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Keywords + Actions */}
-        <div className="space-y-6">
-
-          {/* Keywords */}
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 shadow-2xl border border-white/50">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
-              🗝️ Keywords ({keywords.length})
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {keywords.map((keyword, index) => (
-                <span
-                  key={index}
-                  className="bg-gradient-to-r from-blue-100 to-blue-200 text-blue-800 px-4 py-2
-                             rounded-2xl text-sm font-medium hover:shadow-md transition-all cursor-pointer"
-                >
-                  {keyword}
-                </span>
-              ))}
-              {keywords.length === 0 && (
-                <p className="text-gray-400 italic">No keywords detected</p>
-              )}
-            </div>
+            </section>
           </div>
 
-          {/* Action Items */}
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 shadow-2xl border border-white/50 flex-1">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
-              ✅ Action Items ({actions.length})
-            </h3>
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {actions.map((action, index) => (
-                <div
-                  key={index}
-                  className="p-4 bg-gradient-to-r from-orange-50 to-red-50 rounded-2xl border-l-4
-                             border-orange-400 hover:shadow-lg transition-all group"
-                >
-                  <div className="font-semibold text-gray-800">{action}</div>
-                  <div className="text-sm text-gray-500 mt-1 flex items-center gap-2">
-                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                    <span>AI extracted</span>
+          <div className="space-y-8">
+            <section className="rounded-[2rem] border border-white/70 bg-white/75 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+              <h3 className="mb-4 text-xl font-bold text-slate-900">
+                🗝️ Keywords ({keywords.length})
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {keywords.map((keyword, index) => (
+                  <span
+                    key={`${keyword}-${index}`}
+                    className="rounded-2xl bg-gradient-to-r from-sky-100 to-blue-200 px-4 py-2 text-sm font-semibold text-sky-900"
+                  >
+                    {keyword}
+                  </span>
+                ))}
+                {keywords.length === 0 && (
+                  <p className="italic text-slate-400">No keywords detected yet.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-[2rem] border border-white/70 bg-white/75 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+              <h3 className="mb-4 text-xl font-bold text-slate-900">
+                ✅ Action Items ({actions.length})
+              </h3>
+              <div className="max-h-72 space-y-3 overflow-y-auto">
+                {actions.map((action, index) => (
+                  <div
+                    key={`${action}-${index}`}
+                    className="rounded-[1.4rem] border-l-4 border-orange-400 bg-gradient-to-r from-orange-50 to-amber-50 p-4"
+                  >
+                    <div className="text-left font-semibold text-slate-800">
+                      {action}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 text-sm text-slate-500">
+                      <div className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                      <span>AI extracted</span>
+                    </div>
                   </div>
+                ))}
+                {actions.length === 0 && (
+                  <div className="py-10 text-center text-slate-400">
+                    <div className="mb-4 text-4xl">🎯</div>
+                    <p className="font-medium">No actions detected yet</p>
+                    <p className="text-sm">
+                      Try saying "Sarah needs to review the proposal”.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-[2rem] border border-white/70 bg-slate-950 p-6 text-white shadow-[0_24px_70px_rgba(15,23,42,0.18)]">
+              <div className="mb-5">
+                <h3 className="text-2xl font-bold">💬 Meeting Chatbot</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-300">
+                  Ask questions against the latest saved meeting transcript,
+                  OCR text, and action items from the current meeting.
+                </p>
+              </div>
+
+              <div
+                ref={chatRef}
+                className="mb-4 h-[360px] space-y-3 overflow-y-auto rounded-[1.5rem] bg-white/5 p-4"
+              >
+                {chatHistory.map((message, index) => (
+                  <div
+                    key={`${message.role}-${index}`}
+                    className={`max-w-[92%] rounded-[1.4rem] px-4 py-3 text-left leading-7 shadow-sm ${
+                      message.role === "user"
+                        ? "ml-auto bg-sky-500 text-white"
+                        : "bg-white/10 text-slate-100"
+                    }`}
+                  >
+                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] opacity-70">
+                      {message.role === "user" ? "You" : "FloatNote"}
+                    </p>
+                    <p>{message.text}</p>
+                  </div>
+                ))}
+
+                {chatHistory.length === 0 && !chatLoading && (
+                  <div className="flex h-full items-center justify-center text-center text-slate-400">
+                    <div>
+                      <div className="mb-3 text-4xl">🧭</div>
+                      <p className="font-medium">
+                        Ask about decisions, deadlines, or OCR content.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {chatLoading && (
+                  <div className="max-w-[92%] rounded-[1.4rem] bg-white/10 px-4 py-3 text-left text-slate-200">
+                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] opacity-70">
+                      FloatNote
+                    </p>
+                    <p>Thinking through the saved meeting context...</p>
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={handleAskChatbot} className="space-y-3">
+                <textarea
+                  value={chatQuestion}
+                  onChange={(event) => setChatQuestion(event.target.value)}
+                  placeholder="Ask something like: What were the main blockers discussed?"
+                  className="min-h-[110px] w-full rounded-[1.4rem] border border-white/10 bg-white/10 px-4 py-3 text-white placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+                />
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-sm text-slate-300">
+                    {chatError ? (
+                      <span className="text-rose-300">{chatError}</span>
+                    ) : (
+                      <span>
+                        Using{" "}
+                        {meetingId ? `meeting #${meetingId}` : "the latest saved meeting"}.
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={chatLoading}
+                    className="rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 px-6 py-3 font-semibold text-slate-950 shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {chatLoading ? "Asking..." : "Ask Chatbot"}
+                  </button>
                 </div>
-              ))}
-              {actions.length === 0 && (
-                <div className="text-center py-12 text-gray-400">
-                  <div className="text-4xl mb-4">🎯</div>
-                  <p className="font-medium">No actions detected yet</p>
-                  <p className="text-sm">
-                    Try saying "Sarah needs to review the proposal"
-                  </p>
-                </div>
-              )}
-            </div>
+              </form>
+            </section>
           </div>
         </div>
-      </div>
 
-      {/* Control Bar */}
-      <div className="max-w-7xl mx-auto mt-12 p-6 bg-white/50 backdrop-blur-xl rounded-3xl border border-white/50">
-        <div className="flex flex-col sm:flex-row gap-4 items-center justify-between">
-          <div className="flex items-center gap-6 text-sm text-gray-600">
-            <span>🔊 Microphone: Active</span>
-            <span>⚡ Latency: 2.5s</span>
-            <span>🎯 Accuracy: 99%</span>
-            <span>💾 Auto-save enabled</span>
+        <div className="mt-10 rounded-[2rem] border border-white/70 bg-white/60 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-2 text-sm text-slate-600 md:flex-row md:flex-wrap md:gap-6">
+              <span>🎙️ Microphone: Active</span>
+              <span>⚡ Latency: 2.5s</span>
+              <span>🎯 Accuracy: 99%</span>
+              <span>💾 Auto-save enabled</span>
+            </div>
+            <button
+              onClick={clearAll}
+              className="rounded-2xl bg-gradient-to-r from-rose-500 to-rose-600 px-8 py-3 font-semibold text-white shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl"
+            >
+              🗑️ Clear Dashboard
+            </button>
           </div>
-          <button
-            onClick={clearAll}
-            className="px-8 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white
-                      font-semibold rounded-2xl hover:shadow-xl hover:scale-105 transition-all
-                      duration-200 flex items-center gap-2"
-          >
-            🗑️ Clear All
-          </button>
         </div>
       </div>
     </div>
