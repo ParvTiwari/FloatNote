@@ -12,6 +12,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [summary, setSummary] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
   const [chatQuestion, setChatQuestion] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
@@ -41,94 +42,108 @@ function App() {
   }, [chatHistory, chatLoading]);
 
   useEffect(() => {
-    const ws = new WebSocket(WS_BASE_URL);
-    wsRef.current = ws;
+    let reconnectTimer = null;
+    let isUnmounted = false;
 
-    ws.onopen = () => {
-      setConnectionStatus("🟢 Connected");
-      console.log("✅ Connected - waiting handshake");
-    };
+    const connect = () => {
+      const ws = new WebSocket(WS_BASE_URL);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
+      ws.onopen = () => {
+        setConnectionStatus("🟢 Connected");
+        console.log("✅ Connected - waiting handshake");
+      };
 
-        if (data.type === "connected") {
-          setMeetingId(data.meeting_id ?? null);
-          setConnectionStatus("🟢 Connected");
-          return;
-        }
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
 
-        if (data.type === "ocr") {
-          const incoming = data.ocr;
-          if (incoming?.text?.trim().length > 0) {
-            setOcr({
-              text: incoming.text,
-              keywords: incoming.keywords || [],
-              _everReceived: true,
-            });
-          } else {
-            setOcr((prev) => ({ ...prev, _everReceived: true }));
+          if (data.type === "connected") {
+            setMeetingId(data.meeting_id ?? null);
+            setConnectionStatus("🟢 Connected");
+            return;
           }
-          return;
-        }
 
-        const analysis = data;
+          if (data.type === "ocr") {
+            const incoming = data.ocr;
+            if (incoming?.text?.trim().length > 0) {
+              setOcr({
+                text: incoming.text,
+                keywords: incoming.keywords || [],
+                _everReceived: true,
+              });
+            } else {
+              setOcr((prev) => ({ ...prev, _everReceived: true }));
+            }
+            return;
+          }
 
-        if (analysis.meeting_id) {
-          setMeetingId(analysis.meeting_id);
-        }
+          const analysis = data;
 
-        if (analysis.text?.trim()) {
-          setTranscript((prev) => [...prev, analysis.text]);
-        }
+          if (analysis.meeting_id) {
+            setMeetingId(analysis.meeting_id);
+          }
 
-        setKeywords((prev) => {
-          const allKeywords = [...prev, ...(analysis.keywords || [])];
-          return [...new Set(allKeywords)].slice(0, 20);
-        });
+          if (analysis.text?.trim()) {
+            setTranscript((prev) => [...prev, analysis.text]);
+          }
 
-        if (analysis.actions && analysis.actions.length > 0) {
-          setActions((prev) => {
-            const normalizedExisting = prev.map((item) => item.toLowerCase());
-            const nextActions = analysis.actions.filter((action) => {
-              const normalizedAction = String(action).toLowerCase();
-              return !normalizedExisting.includes(normalizedAction);
-            });
-            return [...prev, ...nextActions];
+          setKeywords((prev) => {
+            const allKeywords = [...prev, ...(analysis.keywords || [])];
+            return [...new Set(allKeywords)].slice(0, 20);
           });
-        }
 
-        if (analysis.ocr) {
-          const incoming = analysis.ocr;
-          if (incoming.text && incoming.text.trim().length > 0) {
-            setOcr({
-              text: incoming.text,
-              keywords: incoming.keywords || [],
-              _everReceived: true,
+          if (analysis.actions && analysis.actions.length > 0) {
+            setActions((prev) => {
+              const normalizedExisting = prev.map((item) => item.toLowerCase());
+              const nextActions = analysis.actions.filter((action) => {
+                const normalizedAction = String(action).toLowerCase();
+                return !normalizedExisting.includes(normalizedAction);
+              });
+              return [...prev, ...nextActions];
             });
           }
+
+          if (analysis.ocr) {
+            const incoming = analysis.ocr;
+            if (incoming.text && incoming.text.trim().length > 0) {
+              setOcr({
+                text: incoming.text,
+                keywords: incoming.keywords || [],
+                _everReceived: true,
+              });
+            }
+          }
+        } catch {
+          console.log("Terminal text:", event.data);
         }
-      } catch (e) {
-        console.log("Terminal text:", event.data);
-      }
+      };
+
+      ws.onclose = () => {
+        if (isUnmounted) return;
+        setConnectionStatus("🔴 Disconnected");
+        reconnectTimer = setTimeout(() => {
+          console.log("🔄 Reconnecting...");
+          connect();
+        }, 2000);
+      };
+
+      ws.onerror = (error) => {
+        setConnectionStatus("❌ Error");
+        console.error("WebSocket error:", error);
+      };
     };
 
-    ws.onclose = () => {
-      setConnectionStatus("🔴 Disconnected");
-      setTimeout(() => {
-        console.log("🔄 Reconnecting...");
-        window.location.reload();
-      }, 2000);
-    };
-
-    ws.onerror = (error) => {
-      setConnectionStatus("❌ Error");
-      console.error("WebSocket error:", error);
-    };
+    connect();
 
     return () => {
-      ws.close();
+      isUnmounted = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
   }, []);
 
@@ -139,6 +154,7 @@ function App() {
 
     summaryRequestInFlightRef.current = true;
     setSummaryLoading(true);
+    setSummaryError("");
 
     try {
       const endpoint = meetingId
@@ -156,6 +172,7 @@ function App() {
       const message =
         error instanceof Error ? error.message : "Unexpected summary error.";
       setSummary("");
+      setSummaryError(message);
       console.error("Summary error:", message);
     } finally {
       summaryRequestInFlightRef.current = false;
@@ -223,12 +240,21 @@ function App() {
     }
   }
 
+  // Enter sends the question, Shift+Enter inserts a newline.
+  function handleChatKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleAskChatbot(event);
+    }
+  }
+
   const clearAll = () => {
     setTranscript([]);
     setKeywords([]);
     setActions([]);
     setOcr({ text: "", keywords: [], _everReceived: false });
     setSummary("");
+    setSummaryError("");
     setChatQuestion("");
     setChatError("");
     setChatHistory([]);
@@ -378,7 +404,9 @@ function App() {
                 </div>
 
                 <div className="h-[220px] overflow-y-auto rounded-[1.5rem] border border-slate-200 bg-white p-5 text-left shadow-inner">
-                  {summary ? (
+                  {summaryError ? (
+                    <p className="font-medium text-rose-600">⚠️ {summaryError}</p>
+                  ) : summary ? (
                     <pre className="whitespace-pre-wrap font-sans leading-7 text-slate-700">
                       {summary}
                     </pre>
@@ -498,7 +526,8 @@ function App() {
                 <textarea
                   value={chatQuestion}
                   onChange={(event) => setChatQuestion(event.target.value)}
-                  placeholder="Ask something like: What were the main blockers discussed?"
+                  onKeyDown={handleChatKeyDown}
+                  placeholder="Ask something like: What were the main blockers discussed? (Enter to send, Shift+Enter for a new line)"
                   className="min-h-[110px] w-full rounded-[1.4rem] border border-white/10 bg-white/10 px-4 py-3 text-white placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
                 />
 
@@ -530,10 +559,10 @@ function App() {
         <div className="mt-10 rounded-[2rem] border border-white/70 bg-white/60 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-col gap-2 text-sm text-slate-600 md:flex-row md:flex-wrap md:gap-6">
-              <span>🎙️ Microphone: Active</span>
-              <span>⚡ Latency: 2.5s</span>
-              <span>🎯 Accuracy: 99%</span>
-              <span>💾 Auto-save enabled</span>
+              <span>{connectionStatus}</span>
+              <span>📝 Transcript lines: {transcript.length}</span>
+              <span>🗝️ Keywords: {keywords.length}</span>
+              <span>✅ Actions: {actions.length}</span>
             </div>
             <button
               onClick={clearAll}
