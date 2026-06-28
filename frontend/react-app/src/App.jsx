@@ -85,7 +85,10 @@ function App() {
           }
 
           if (analysis.text?.trim()) {
-            setTranscript((prev) => [...prev, analysis.text]);
+            setTranscript((prev) => [
+              ...prev,
+              { text: analysis.text, source: analysis.source || "MIC" },
+            ]);
           }
 
           setKeywords((prev) => {
@@ -313,14 +316,32 @@ function App() {
                 ref={transcriptRef}
                 className="h-[360px] space-y-3 overflow-y-auto pr-2"
               >
-                {transcript.map((text, index) => (
-                  <div
-                    key={`${text}-${index}`}
-                    className="rounded-[1.5rem] border-l-4 border-sky-300 bg-gradient-to-r from-slate-50 to-sky-50 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-                  >
-                    <p className="text-left leading-7 text-slate-700">{text}</p>
-                  </div>
-                ))}
+                {transcript.map((entry, index) => {
+                  const isSpeaker = entry.source === "SPEAKER";
+                  return (
+                    <div
+                      key={`${entry.text}-${index}`}
+                      className={`rounded-[1.5rem] border-l-4 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${
+                        isSpeaker
+                          ? "border-violet-300 bg-gradient-to-r from-slate-50 to-violet-50"
+                          : "border-sky-300 bg-gradient-to-r from-slate-50 to-sky-50"
+                      }`}
+                    >
+                      <span
+                        className={`mb-2 inline-flex items-center gap-1 rounded-full px-3 py-0.5 text-xs font-semibold uppercase tracking-wide ${
+                          isSpeaker
+                            ? "bg-violet-100 text-violet-700"
+                            : "bg-sky-100 text-sky-700"
+                        }`}
+                      >
+                        {isSpeaker ? "🔊 Participant" : "🎤 You"}
+                      </span>
+                      <p className="text-left leading-7 text-slate-700">
+                        {entry.text}
+                      </p>
+                    </div>
+                  );
+                })}
 
                 {transcript.length === 0 && (
                   <div className="flex h-full items-center justify-center text-slate-400">

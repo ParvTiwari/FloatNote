@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -9,6 +10,11 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import whisper
+
+try:
+    import soundcard as sc
+except Exception:  # pragma: no cover - optional/loopback may be unavailable
+    sc = None
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,12 +46,24 @@ SILENCE_RMS_THRESHOLD = 0.015
 MAX_WS_CLIENTS = 3
 OCR_EMPTY_RESULT = {"text": "", "keywords": []}
 
+# Source labels for the two audio pipelines.
+SOURCE_MIC = "MIC"          # the local user's microphone
+SOURCE_SPEAKER = "SPEAKER"  # system/loopback audio (remote participants)
+
+# System-output (loopback) capture can run at the render device's native rate
+# (commonly 48 kHz stereo); we downmix + resample to SAMPLE_RATE for Whisper.
+ENABLE_SPEAKER = os.getenv("ENABLE_SPEAKER", "true").strip().lower() == "true"
+
 loop: asyncio.AbstractEventLoop | None = None
 stream: sd.InputStream | None = None
+speaker_thread: threading.Thread | None = None
+speaker_stop = threading.Event()
 clients: set[WebSocket] = set()
 ocr_processor: OCRProcessor | None = None
 queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 buffer: deque = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
+speaker_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+speaker_buffer: deque = deque(maxlen=SAMPLE_RATE * BUFFER_SECONDS)
 db_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 active_meeting_id: int | None = None
 DEBUG_EXPORT_DIR = Path(__file__).resolve().parents[2] / "debug_exports"
@@ -118,7 +136,7 @@ async def database_worker_loop():
 async def lifespan(app: FastAPI):
     await init_db()
     print("🗄️  Database initialized")
-    global loop, stream, ocr_processor
+    global loop, stream, speaker_thread, ocr_processor
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -128,6 +146,17 @@ async def lifespan(app: FastAPI):
         callback=audio_callback,
     )
     stream.start()
+    print("🎤 Microphone started")
+
+    if ENABLE_SPEAKER:
+        speaker_thread = start_speaker_capture()
+        if speaker_thread is not None:
+            print("🔊 Speaker (system audio) capture started")
+        else:
+            print("⚠️ Speaker capture unavailable — continuing with microphone only")
+    else:
+        print("⚠️ Speaker capture disabled because ENABLE_SPEAKER is not true")
+
     if os.getenv("ENABLE_OCR", "false").strip().lower() == "true":
         ocr_processor = OCRProcessor(
             check_interval=float(os.getenv("OCR_INTERVAL_SECONDS", "1.0")),
@@ -140,15 +169,25 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ OCR disabled because ENABLE_OCR is not true")
 
-    asyncio.create_task(audio_collector())
+    asyncio.create_task(audio_collector(queue, buffer))
     asyncio.create_task(database_worker_loop())
-    print("🎤 Microphone started")
+    # One transcription worker per source. OCR is attached to the mic worker
+    # only so a slide is captured once per chunk (not duplicated per stream).
+    asyncio.create_task(transcription_worker(SOURCE_MIC, buffer, with_ocr=True))
+    if speaker_thread is not None:
+        asyncio.create_task(audio_collector(speaker_queue, speaker_buffer))
+        asyncio.create_task(
+            transcription_worker(SOURCE_SPEAKER, speaker_buffer, with_ocr=False)
+        )
 
     yield
 
     if stream:
         stream.stop()
         stream.close()
+    if speaker_thread is not None:
+        speaker_stop.set()
+        speaker_thread.join(timeout=2.0)
     if ocr_processor:
         ocr_processor.stop_background()
         ocr_processor = None
@@ -179,14 +218,145 @@ def audio_callback(indata, frames, time, status):
             pass
 
 
-async def audio_collector():
+def _speaker_capture_loop():
+    """Capture system/loopback audio in a background thread.
+
+    Uses `soundcard`'s WASAPI loopback microphone (the default speaker captured
+    as an input) so it records whatever is playing through the speakers — i.e.
+    remote meeting participants. Records mono at SAMPLE_RATE (soundcard resamples
+    internally) and feeds chunks into `speaker_queue`, mirroring the mic path.
+    """
+    try:
+        speaker = sc.default_speaker()
+        mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+        print(f"🔊 Loopback target: '{speaker.name}'")
+        with mic.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=1024) as rec:
+            while not speaker_stop.is_set():
+                data = rec.record(numframes=4096)  # blocks until available
+                if loop is None or speaker_queue.full():
+                    continue
+                samples = (
+                    data[:, 0] if getattr(data, "ndim", 1) > 1 else data
+                ).astype(np.float32, copy=False)
+                try:
+                    loop.call_soon_threadsafe(speaker_queue.put_nowait, samples)
+                except RuntimeError:
+                    pass
+    except Exception as exc:  # pragma: no cover - hardware/host dependent
+        print(f"⚠️ Speaker loopback capture stopped: {exc}")
+
+
+def start_speaker_capture() -> threading.Thread | None:
+    """Start the loopback capture thread, or return None if unsupported."""
+    if sc is None:
+        print("⚠️ `soundcard` not installed; cannot capture system audio")
+        return None
+    try:
+        # Probe that a loopback device can be opened before committing.
+        speaker = sc.default_speaker()
+        sc.get_microphone(id=str(speaker.name), include_loopback=True)
+    except Exception as exc:  # pragma: no cover - hardware/host dependent
+        print(f"⚠️ Speaker loopback unavailable: {exc}")
+        return None
+
+    speaker_stop.clear()
+    thread = threading.Thread(
+        target=_speaker_capture_loop, name="speaker-capture", daemon=True
+    )
+    thread.start()
+    return thread
+
+
+async def audio_collector(source_queue: asyncio.Queue, target_buffer: deque):
     while True:
         try:
-            samples = await asyncio.wait_for(queue.get(), timeout=1.0)
-            buffer.extend(samples)
-            queue.task_done()
+            samples = await asyncio.wait_for(source_queue.get(), timeout=1.0)
+            target_buffer.extend(samples)
+            source_queue.task_done()
         except asyncio.TimeoutError:
             continue
+
+
+async def broadcast(payload: dict):
+    disconnected: list[WebSocket] = []
+    for client_ws in list(clients):
+        try:
+            await client_ws.send_json(payload)
+        except Exception:
+            disconnected.append(client_ws)
+    for dead in disconnected:
+        clients.discard(dead)
+
+
+async def transcription_worker(source: str, target_buffer: deque, with_ocr: bool):
+    """Continuously transcribe one audio source, persist, and broadcast.
+
+    Runs only while a meeting is active (i.e. a client is connected). Each
+    emitted packet carries a `source` label so the UI/DB can tell the local
+    microphone apart from remote participants captured via system audio.
+    """
+    print(f"🧠 Transcription worker started for {source}")
+    while True:
+        if active_meeting_id is None or len(target_buffer) < CHUNK_SIZE:
+            await asyncio.sleep(0.1)
+            continue
+
+        audio_np = np.array(target_buffer, dtype=np.float32)[:CHUNK_SIZE]
+        current_volume = float(np.sqrt(np.mean(audio_np**2)))
+
+        if current_volume <= SILENCE_RMS_THRESHOLD:
+            for _ in range(min(CHUNK_SIZE // 4, len(target_buffer))):
+                try:
+                    target_buffer.popleft()
+                except IndexError:
+                    break
+            continue
+
+        def _transcribe(audio: np.ndarray = audio_np) -> dict:
+            return model.transcribe(
+                audio,
+                fp16=False,
+                language="en",
+                temperature=0,
+            )
+
+        try:
+            result = await loop.run_in_executor(None, _transcribe)
+        except Exception as transcribe_err:
+            print(f"⚠️ Whisper error ({source}): {transcribe_err}")
+            continue
+
+        for _ in range(min(CHUNK_SIZE, len(target_buffer))):
+            try:
+                target_buffer.popleft()
+            except IndexError:
+                break
+
+        text = result.get("text", "").strip()
+        if len(text) <= 2:
+            continue
+
+        analysis = process_text(text)
+        ocr_result = (
+            await ocr_processor.process_async()
+            if with_ocr and ocr_processor is not None
+            else OCR_EMPTY_RESULT
+        )
+        analysis["ocr"] = ocr_result
+        analysis["source"] = source
+        analysis["meeting_id"] = active_meeting_id
+
+        try:
+            await db_queue.put(
+                {
+                    "meeting_id": active_meeting_id,
+                    "data": analysis,
+                }
+            )
+        except asyncio.QueueFull:
+            print("⚠️ [DB Queue Full] Dropping data packet!")
+
+        await broadcast(analysis)
 
 
 @app.websocket("/ws")
@@ -217,74 +387,11 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         ping_task = asyncio.create_task(ping_client(ws))
 
+        # Transcription + broadcast now happen in the per-source background
+        # workers; the socket just stays open to receive broadcasts and detect
+        # disconnects. receive() returns when the client goes away.
         while True:
-            if len(buffer) < CHUNK_SIZE:
-                await asyncio.sleep(0.1)
-                continue
-
-            audio_np = np.array(buffer, dtype=np.float32)[:CHUNK_SIZE]
-            current_volume = float(np.sqrt(np.mean(audio_np**2)))
-
-            if current_volume <= SILENCE_RMS_THRESHOLD:
-                for _ in range(min(CHUNK_SIZE // 4, len(buffer))):
-                    try:
-                        buffer.popleft()
-                    except IndexError:
-                        break
-                continue
-
-            def _transcribe(audio: np.ndarray = audio_np) -> dict:
-                return model.transcribe(
-                    audio,
-                    fp16=False,
-                    language="en",
-                    temperature=0,
-                )
-
-            try:
-                result = await loop.run_in_executor(None, _transcribe)
-            except Exception as transcribe_err:
-                print(f"⚠️ Whisper error: {transcribe_err}")
-                continue
-
-            for _ in range(min(CHUNK_SIZE, len(buffer))):
-                try:
-                    buffer.popleft()
-                except IndexError:
-                    break
-
-            text = result.get("text", "").strip()
-            if len(text) <= 2:
-                continue
-
-            analysis = process_text(text)
-            ocr_result = (
-                await ocr_processor.process_async()
-                if ocr_processor is not None
-                else OCR_EMPTY_RESULT
-            )
-            analysis["ocr"] = ocr_result
-            analysis["meeting_id"] = active_meeting_id
-
-            try:
-                await db_queue.put(
-                    {
-                        "meeting_id": active_meeting_id,
-                        "data": analysis,
-                    }
-                )
-            except asyncio.QueueFull:
-                print("⚠️ [DB Queue Full] Dropping data packet!")
-
-            disconnected: list[WebSocket] = []
-            for client_ws in list(clients):
-                try:
-                    await client_ws.send_json(analysis)
-                except Exception:
-                    disconnected.append(client_ws)
-
-            for dead in disconnected:
-                clients.discard(dead)
+            await ws.receive_text()
 
     except WebSocketDisconnect:
         pass

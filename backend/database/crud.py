@@ -142,11 +142,13 @@ async def save_to_database(data: dict, meeting_id: int | None = None):
                 meeting_id = await get_current_meeting_id(session)
 
             # --- 1. AUDIO TRANSCRIPT SAVE ---
-            speaker_label = "MIC"
+            # `source` distinguishes the local mic ("MIC") from system/loopback
+            # audio of remote participants ("SPEAKER"). Defaults to MIC.
+            speaker_label = data.get("source") or "MIC"
             if data.get("text"):
                 # Speaker nikaalo (Agar PyAnnote ne bheja hai)
                 if data.get("speakers") and len(data["speakers"]) > 0:
-                    speaker_label = data["speakers"][0].get("speaker") or "MIC"
+                    speaker_label = data["speakers"][0].get("speaker") or speaker_label
                 
                 keywords_list = data.get("keywords", [])
                 audio_keywords = ",".join(keywords_list) if isinstance(keywords_list, list) else ""
