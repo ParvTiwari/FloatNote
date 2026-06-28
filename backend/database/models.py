@@ -33,5 +33,12 @@ class ActionItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     meeting_id = Column(Integer, ForeignKey("meetings.id"))
     description = Column(String, nullable=False)
-    assignee = Column(String, default="unassigned") 
+    assignee = Column(String, default="unassigned")
     status = Column(String, default="pending")
+
+class SpeakerAlias(Base):
+    __tablename__ = "speaker_aliases"
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id"), index=True)
+    speaker_key = Column(String, index=True)   # e.g. "SPEAKER_00"
+    display_name = Column(String, nullable=False)  # user-assigned real name
