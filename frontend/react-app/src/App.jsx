@@ -10,6 +10,8 @@ function App() {
   const [actions, setActions] = useState([]);
   const [ocr, setOcr] = useState({ text: "", keywords: [] });
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
+  const [connected, setConnected] = useState(false);
+  const [loadingTip, setLoadingTip] = useState(0);
   // Meeting control + privacy state (mirrors the backend status broadcasts).
   const [recording, setRecording] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -52,6 +54,13 @@ function App() {
     }
   }, [chatHistory, chatLoading]);
 
+  // Cycle the connecting-screen status lines while we wait for the socket.
+  useEffect(() => {
+    if (connected) return;
+    const id = setInterval(() => setLoadingTip((t) => t + 1), 1800);
+    return () => clearInterval(id);
+  }, [connected]);
+
   useEffect(() => {
     let reconnectTimer = null;
     let isUnmounted = false;
@@ -62,6 +71,7 @@ function App() {
 
       ws.onopen = () => {
         setConnectionStatus("🟢 Connected");
+        setConnected(true);
         console.log("✅ Connected - waiting handshake");
       };
 
@@ -150,6 +160,7 @@ function App() {
       ws.onclose = () => {
         if (isUnmounted) return;
         setConnectionStatus("🔴 Disconnected");
+        setConnected(false);
         reconnectTimer = setTimeout(() => {
           console.log("🔄 Reconnecting...");
           connect();
@@ -158,6 +169,7 @@ function App() {
 
       ws.onerror = (error) => {
         setConnectionStatus("❌ Error");
+        setConnected(false);
         console.error("WebSocket error:", error);
       };
     };
@@ -423,6 +435,85 @@ function App() {
     setChatError("");
     setChatHistory([]);
   };
+
+  if (!connected) {
+    const tips = [
+      "Waking up the meeting engine…",
+      "Warming up Whisper transcription…",
+      "Tuning microphone & system audio…",
+      "Calibrating speaker diarization…",
+      "Almost ready for your meeting…",
+    ];
+    return (
+      <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_top,_#fef3c7_0%,_#fff7ed_28%,_#e0f2fe_64%,_#dbeafe_100%)] p-6">
+        <style>{`
+          @keyframes fnEq { 0%,100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+          @keyframes fnFloat { 0%,100% { transform: translate(0,0); } 50% { transform: translate(14px,-26px); } }
+          @keyframes fnShimmer { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+          @keyframes fnRing { 0% { transform: scale(0.55); opacity: 0.7; } 100% { transform: scale(2.3); opacity: 0; } }
+          @keyframes fnFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        `}</style>
+
+        {/* Ambient floating glows */}
+        <div className="pointer-events-none absolute -left-12 top-1/4 h-44 w-44 rounded-full bg-sky-300/40 blur-3xl" style={{ animation: "fnFloat 9s ease-in-out infinite" }} />
+        <div className="pointer-events-none absolute right-0 top-8 h-56 w-56 rounded-full bg-amber-300/40 blur-3xl" style={{ animation: "fnFloat 11s ease-in-out infinite reverse" }} />
+        <div className="pointer-events-none absolute bottom-0 left-1/3 h-60 w-60 rounded-full bg-violet-300/40 blur-3xl" style={{ animation: "fnFloat 13s ease-in-out infinite" }} />
+
+        <div className="relative z-10 flex w-full max-w-md flex-col items-center gap-8 rounded-[2.5rem] border border-white/70 bg-white/60 px-10 py-14 text-center shadow-[0_30px_90px_rgba(15,23,42,0.18)] backdrop-blur-2xl">
+          <p className="text-xs font-semibold uppercase tracking-[0.4em] text-sky-700">
+            Real-Time AI Meeting Assistant
+          </p>
+
+          {/* Mic orb radiating sound rings */}
+          <div className="relative flex h-28 w-28 items-center justify-center">
+            <span className="absolute h-full w-full rounded-full border-2 border-sky-400/50" style={{ animation: "fnRing 2.4s ease-out infinite" }} />
+            <span className="absolute h-full w-full rounded-full border-2 border-violet-400/50" style={{ animation: "fnRing 2.4s ease-out 0.8s infinite" }} />
+            <span className="absolute h-full w-full rounded-full border-2 border-amber-400/50" style={{ animation: "fnRing 2.4s ease-out 1.6s infinite" }} />
+            <div className="flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-violet-500 to-amber-400 text-3xl shadow-lg shadow-violet-500/30">
+              🎙️
+            </div>
+          </div>
+
+          <h1
+            className="bg-gradient-to-r from-sky-600 via-violet-600 to-amber-500 bg-[length:200%_auto] bg-clip-text font-serif text-4xl font-black tracking-tight text-transparent"
+            style={{ animation: "fnShimmer 3s linear infinite" }}
+          >
+            FloatNote AI
+          </h1>
+
+          {/* Live audio equalizer */}
+          <div className="flex h-12 items-end gap-1.5">
+            {[0, 0.18, 0.36, 0.12, 0.3, 0.06, 0.24, 0.42].map((delay, i) => (
+              <span
+                key={i}
+                className="w-2.5 rounded-full bg-gradient-to-t from-sky-500 to-violet-500"
+                style={{
+                  height: "100%",
+                  transformOrigin: "bottom",
+                  animation: `fnEq 1s ease-in-out ${delay}s infinite`,
+                }}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="h-2.5 w-2.5 animate-ping rounded-full bg-amber-500" />
+            <span
+              key={loadingTip}
+              className="text-base font-medium text-slate-700"
+              style={{ animation: "fnFade 0.5s ease-out" }}
+            >
+              {tips[loadingTip % tips.length]}
+            </span>
+          </div>
+
+          <p className="text-xs text-slate-400">
+            🔒 Connecting securely on your device · localhost:8000
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#fef3c7_0%,_#fff7ed_28%,_#e0f2fe_64%,_#dbeafe_100%)] p-6 md:p-8">
