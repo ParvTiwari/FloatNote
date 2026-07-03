@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-inter: "Inter", system-ui, sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  @apply bg-white text-slate-600 antialiased transition-colors duration-300
+    dark:bg-slate-950 dark:text-slate-200;
+  background-image:
+    radial-gradient(60rem 60rem at 80% -10%, rgba(124, 58, 237, 0.06), transparent 60%),
+    radial-gradient(50rem 50rem at 0% 10%, rgba(14, 165, 233, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+.dark body {
+  background-image:
+    radial-gradient(60rem 60rem at 80% -10%, rgba(124, 58, 237, 0.18), transparent 60%),
+    radial-gradient(50rem 50rem at 0% 10%, rgba(14, 165, 233, 0.14), transparent 55%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@layer utilities {
+  /* Theme-aware text tokens — light value first, dark override second. */
+  .t-strong {
+    @apply text-slate-900 dark:text-white;
+  }
+  .t-body {
+    @apply text-slate-600 dark:text-slate-300;
+  }
+  .t-muted {
+    @apply text-slate-500 dark:text-slate-400;
+  }
+  .t-faint {
+    @apply text-slate-400 dark:text-slate-500;
+  }
+  .border-hair {
+    @apply border-slate-200 dark:border-white/10;
+  }
+}
+
+@layer components {
+  .container-page {
+    @apply mx-auto w-full max-w-6xl px-6;
+  }
+
+  .gradient-text {
+    @apply bg-gradient-to-r from-sky-500 via-violet-500 to-teal-500 bg-clip-text
+      text-transparent dark:from-sky-400 dark:via-violet-400 dark:to-teal-300;
+  }
+
+  .glass-card {
+    @apply rounded-2xl border border-slate-200 bg-white/80 shadow-sm backdrop-blur-sm
+      dark:border-white/10 dark:bg-white/[0.03] dark:shadow-none;
+  }
+
+  .section-alt {
+    @apply border-y border-slate-200 bg-slate-50/70 dark:border-white/5 dark:bg-white/[0.015];
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-sky-500 to-violet-600
+      px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-900/30
+      transition-transform duration-200 hover:scale-[1.03] focus:outline-none focus-visible:ring-2
+      focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white
+      dark:focus-visible:ring-offset-slate-950;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-slate-300 bg-white
+      px-6 py-3 text-sm font-semibold text-slate-700 transition-colors duration-200 hover:border-slate-400
+      hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400
+      focus-visible:ring-offset-2 focus-visible:ring-offset-white
+      dark:border-white/15 dark:bg-white/[0.02] dark:text-slate-200 dark:hover:border-white/30
+      dark:hover:bg-white/[0.06] dark:focus-visible:ring-offset-slate-950;
+  }
+
+  .section-eyebrow {
+    @apply mb-3 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-100
+      px-3 py-1 text-xs font-medium uppercase tracking-wider text-sky-600
+      dark:border-white/10 dark:bg-white/[0.03] dark:text-sky-300;
+  }
+}
