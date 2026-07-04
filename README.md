@@ -12,8 +12,9 @@ FloatNote is a desktop-first meeting assistant that quietly runs in the backgrou
 |---|---|
 | 🎤 **Live Transcription** | Streams audio from your mic through OpenAI Whisper (`base` model) in real-time |
 | 🖥️ **Screen OCR** | Captures slide content as it changes, extracting text and keywords automatically |
-| 🧠 **AI Summarization** | Generates meeting summaries via BART/Pegasus on HuggingFace Inference API (or local fallback) |
-| 💬 **Meeting Chatbot** | Ask questions about any past meeting — answers grounded in a FAISS vector store via RAG |
+| 🗣️ **Speaker Diarization** | Labels each utterance by speaker in real time using offline Resemblyzer voice embeddings (`SPEAKER_00`, `SPEAKER_01`, …) |
+| 🧠 **AI Summarization** | Generates meeting summaries via Groq's Llama 3.3 70B |
+| 💬 **Meeting Chatbot** | Ask questions about any past meeting — answers grounded in a local vector store via RAG (FAISS-backed when enabled) |
 | 🗃️ **Persistent Storage** | All transcripts, OCR captures, and action items saved to SQLite via async SQLAlchemy |
 | ⚡ **Action Item Extraction** | NLP pipeline (spaCy) detects tasks and assignees from spoken text |
 | 🖥️ **Electron Desktop App** | Optional Electron wrapper for a native windowed experience |
@@ -25,29 +26,34 @@ FloatNote is a desktop-first meeting assistant that quietly runs in the backgrou
 ```
 FloatNote/
 ├── backend/
-│   ├── main.py                        # FastAPI app + WebSocket server
+│   ├── main.py                        # Entrypoint — loads env, starts the server
 │   ├── requirements.txt
 │   ├── ai_modules/
 │   │   ├── stt/
-│   │   │   └── whisper_engine.py      # Audio capture + Whisper transcription
+│   │   │   └── whisper_engine.py      # FastAPI app, all routes, WebSocket + Whisper transcription
 │   │   ├── ocr/
 │   │   │   ├── ocr_processor.py       # Screen capture + Tesseract OCR
 │   │   │   └── keyword_filter.py      # Keyword post-processing
 │   │   ├── summarizer/
-│   │   │   └── summarizer.py          # HuggingFace summarization (BART/Pegasus)
+│   │   │   └── summarizer.py          # Groq LLM summarization (Llama 3.3 70B)
 │   │   ├── chatbot/
-│   │   │   └── chatbot.py             # LangChain RAG chatbot (FAISS + Qwen LLM)
+│   │   │   └── chatbot.py             # LangChain RAG chatbot (local vector store + Groq LLM)
+│   │   ├── diarization/
+│   │   │   └── diarizer.py            # Offline speaker diarization (Resemblyzer)
 │   │   └── utils/
 │   │       └── nlp_processor.py       # spaCy NLP pipeline
 │   └── database/
 │       ├── models.py                  # SQLAlchemy models (Meeting, Transcript, ActionItem)
 │       ├── crud.py                    # Async database operations
 │       └── view_db.py                 # Database viewer utility
-└── frontend/
-    ├── react-app/                     # Vite + React 19 + Tailwind CSS UI
-    │   └── src/App.jsx                # Main dashboard (WebSocket client)
-    └── electron/
-        └── main.js                    # Electron wrapper (loads localhost:5173)
+├── frontend/
+│   ├── react-app/                     # Vite + React 19 + Tailwind CSS UI
+│   │   └── src/App.jsx                # Main dashboard (WebSocket client)
+│   └── electron/
+│       └── main.js                    # Electron wrapper (loads localhost:5173)
+└── marketing-site/                    # Next.js promo/landing site (SEO-optimized)
+    ├── app/                           # App Router pages, metadata, sitemap, robots
+    └── components/                    # Landing sections + light/dark theme toggle
 ```
 
 ---
@@ -63,7 +69,7 @@ FloatNote/
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/Parth-Gupta-github/FloatNote.git
+git clone https://github.com/ParvTiwari/FloatNote.git
 cd FloatNote
 ```
 
@@ -95,16 +101,16 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 Create a `.env` file inside `backend/`:
 
 ```env
-# Required for AI summarization and chatbot
-HUGGINGFACEHUB_API_TOKEN=hf_...
-
-# Required for keyword filtering (Groq LLM)
+# Required — powers summarization, the chatbot, and keyword filtering (Groq LLM)
 GROQ_API_KEY=gsk_...
+
+# Optional — enables Gemini as an alternate keyword-filtering backend
+GEMINI_API_KEY=...
 ```
 
-> 💡 A HuggingFace API token is **required** for summarization and the chatbot. Get one free at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+> 💡 A Groq API key is **required** — summarization and the chatbot raise an error without it, and keyword filtering falls back to simple deduplication.
 
-> 💡 A Groq API key is **required** for LLM-powered keyword filtering. Without it, keywords fall back to simple deduplication.
+> 💡 No HuggingFace token is needed: the RAG embedding model (`all-MiniLM-L6-v2`) and diarization weights (Resemblyzer) run locally and download automatically on first use.
 
 ### 5. Start the backend
 
@@ -113,7 +119,7 @@ GROQ_API_KEY=gsk_...
 python backend/main.py
 ```
 
-The server starts at `http://localhost:8000` and immediately begins listening to your microphone.
+The server starts at `http://localhost:8000`. It doesn't record on launch — start a meeting explicitly from the UI (or `POST /meetings/start`) to begin capturing your microphone.
 
 ### 6. Start the frontend
 
@@ -137,13 +143,49 @@ npm start
 
 ## 📡 API Reference
 
+The FastAPI app and all routes are defined in [`whisper_engine.py`](backend/ai_modules/stt/whisper_engine.py). Connecting to the WebSocket **no longer** starts a meeting — recording is controlled explicitly via the `/meetings/*` endpoints.
+
+**Real-time stream**
+
 | Method | Endpoint | Description |
 |---|---|---|
-| `WS` | `/ws` | Real-time audio + OCR stream (connects and starts a meeting) |
-| `GET` | `/meetings/latest/summary` | Summarize the most recent meeting |
-| `GET` | `/meetings/{id}/summary` | Summarize a specific meeting by ID |
-| `POST` | `/meetings/latest/chat` | Ask a question about the latest meeting |
-| `POST` | `/meetings/{id}/chat` | Ask a question about a specific meeting |
+| `WS` | `/ws` | Live transcript / OCR / status broadcast channel (max **3** concurrent clients) |
+
+**Meeting control**
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| `POST` | `/meetings/start` | `{ "title"?, "capture_speaker"? }` | Start recording — creates a meeting and opens the mic (and speaker) streams |
+| `POST` | `/meetings/pause` | — | Pause capture on the active meeting |
+| `POST` | `/meetings/resume` | — | Resume a paused meeting |
+| `POST` | `/meetings/stop` | — | Stop recording and release audio devices |
+| `POST` | `/meetings/mute` | `{ "source": "mic"\|"speaker", "muted": bool }` | Mute a source by releasing its OS audio device |
+| `POST` | `/meetings/title` | `{ "title" }` | Set/edit the active meeting title (allowed mid-recording) |
+
+**Speakers**
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| `GET` | `/meetings/{id}/speakers` | — | List speaker aliases for a meeting |
+| `POST` | `/meetings/{id}/speakers` | `{ "speaker_key", "display_name" }` | Rename a diarized speaker (e.g. `SPEAKER_00` → "Alice") |
+
+**Summaries & chat**
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| `GET` | `/meetings/latest/summary` | — | Summarize the most recent meeting |
+| `GET` | `/meetings/{id}/summary` | — | Summarize a specific meeting by ID |
+| `POST` | `/meetings/latest/chat` | `{ "question" }` | Ask a question about the latest meeting |
+| `POST` | `/meetings/{id}/chat` | `{ "question" }` | Ask a question about a specific meeting |
+
+**Debug / export** (dumps captured items, retrieved docs, and model I/O to a JSON file)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/meetings/latest/debug/export` | Export a snapshot of the latest meeting |
+| `GET` | `/meetings/{id}/debug/export` | Export a snapshot of a specific meeting |
+| `POST` | `/meetings/latest/chat/debug` | Chat + export the full retrieval/answer trace (latest) |
+| `POST` | `/meetings/{id}/chat/debug` | Chat + export the full retrieval/answer trace (by ID) |
 
 ### Chat request body
 
@@ -153,14 +195,24 @@ npm start
 }
 ```
 
-### WebSocket message format (incoming)
+### WebSocket messages (server → client)
+
+On connect, and after every control change, the server pushes a **status** snapshot:
 
 ```json
 {
-  "type": "connected",
-  "meeting_id": 42
+  "type": "status",
+  "recording": true,
+  "paused": false,
+  "meeting_id": 42,
+  "title": "Q3 Planning",
+  "mic_muted": false,
+  "speaker_muted": false,
+  "speaker_enabled": true
 }
 ```
+
+During a meeting, transcript/OCR analysis is broadcast as it's produced:
 
 ```json
 {
@@ -172,6 +224,17 @@ npm start
 }
 ```
 
+Renaming a speaker broadcasts a `speaker_renamed` event:
+
+```json
+{
+  "type": "speaker_renamed",
+  "meeting_id": 42,
+  "speaker_key": "SPEAKER_00",
+  "display_name": "Alice"
+}
+```
+
 ---
 
 ## 🤖 AI Models
@@ -179,16 +242,12 @@ npm start
 | Component | Default Model | Configurable |
 |---|---|---|
 | Transcription | `openai/whisper-base` (local) | Change model size in `whisper_engine.py` |
-| Summarization | `facebook/bart-large-cnn` (HF API) | `HF_SUMMARIZER_REPO_ID` env var |
-| Chatbot LLM | `Qwen/Qwen2.5-7B-Instruct` (HF API) | `HUGGINGFACE_CHAT_MODEL` env var |
+| Summarization | `llama-3.3-70b-versatile` (Groq API) | `GROQ_SUMMARY_MODEL` env var |
+| Chatbot LLM | `llama-3.3-70b-versatile` (Groq API) | `GROQ_CHAT_MODEL` env var |
 | Keyword Filtering | `llama-3.3-70b-versatile` (Groq API) | Hardcoded in `keyword_filter.py` |
+| Diarization | Resemblyzer d-vector (local) | `DIARIZATION_SIMILARITY`, `DIARIZATION_MIN_SAMPLES` env vars |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local) | Hardcoded in `chatbot.py` |
 | NLP / Action Items | `en_core_web_sm` (spaCy, local) | — |
-
-**Supported summarizer models:**
-- `facebook/bart-large-cnn`
-- `google/pegasus-xsum`
-- `sshleifer/distilbart-cnn-12-6`
 
 ---
 
@@ -218,13 +277,19 @@ python backend/database/view_db.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `HUGGINGFACEHUB_API_TOKEN` | — | **Required.** HF API token |
-| `GROQ_API_KEY` | — | **Required.** Groq API token for keyword filtering |
-| `HUGGINGFACE_CHAT_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | Chat LLM repo ID |
-| `HF_SUMMARIZER_REPO_ID` | `facebook/bart-large-cnn` | Summarizer model repo ID |
+| `GROQ_API_KEY` | — | **Required.** Groq API token for summarization, chatbot, and keyword filtering |
+| `GEMINI_API_KEY` | — | Optional. Alternate keyword-filtering backend |
+| `GROQ_CHAT_MODEL` | `llama-3.3-70b-versatile` | Chatbot LLM model ID |
+| `GROQ_SUMMARY_MODEL` | `llama-3.3-70b-versatile` | Summarizer LLM model ID |
+| `CHATBOT_USE_FAISS` | `false` | Use FAISS embeddings for retrieval instead of the simple local vector store |
 | `ENABLE_OCR` | `true` | Enable/disable screen capture |
 | `OCR_INTERVAL_SECONDS` | `3.0` | How often to poll for screen changes |
 | `OCR_CHANGE_THRESHOLD` | `0.02` | Minimum pixel-change ratio to trigger OCR |
+| `ENABLE_SPEAKER` | `true` | Enable the separate speaker-audio capture stream |
+| `ENABLE_DIARIZATION` | `true` | Label utterances by speaker via Resemblyzer |
+| `DIARIZATION_SIMILARITY` | `0.70` | Cosine threshold for matching an utterance to an existing speaker |
+| `DIARIZATION_MIN_SAMPLES` | `16000` | Minimum audio samples (~1s) for a stable speaker embedding |
+| `VAD_THRESHOLD` | `0.5` | Voice-activity-detection gate for transcription |
 | `HOST` | `0.0.0.0` | Backend bind host |
 | `PORT` | `8000` | Backend bind port |
 
@@ -236,9 +301,10 @@ python backend/database/view_db.py
 - [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) — async web server + WebSockets
 - [OpenAI Whisper](https://github.com/openai/whisper) — local speech-to-text
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) + [pytesseract](https://github.com/madmaze/pytesseract) — screen reading
-- [Groq API](https://console.groq.com/) (`llama-3.3-70b-versatile`) — LLM-powered keyword filtering
-- [LangChain](https://www.langchain.com/) + [FAISS](https://faiss.ai/) — RAG chatbot
-- [HuggingFace Inference API](https://huggingface.co/inference-api) — summarization + chat LLM
+- [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) — offline speaker diarization (d-vector voice embeddings)
+- [Groq API](https://console.groq.com/) (`llama-3.3-70b-versatile`) — summarization, chatbot, and keyword filtering
+- [LangChain](https://www.langchain.com/) + [FAISS](https://faiss.ai/) — RAG chatbot retrieval
+- [HuggingFace embeddings](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) — local MiniLM embeddings for RAG
 - [spaCy](https://spacy.io/) — action item extraction + NLP
 - [SQLAlchemy (async)](https://docs.sqlalchemy.org/) + [SQLite](https://sqlite.org/) — database
 
