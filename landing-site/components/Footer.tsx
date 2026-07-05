@@ -69,6 +69,17 @@ export function Footer() {
           <p className="text-xs t-faint">
             Powered by Whisper · LangChain · FastAPI
           </p>
+          <p className="text-xs t-muted">
+            Built by{" "}
+            <a
+              href="https://parv-tiwari-portfolio.vercel.app/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium t-strong underline decoration-slate-300 underline-offset-2 transition-colors hover:text-slate-900 dark:decoration-slate-600 dark:hover:text-white"
+            >
+              Parv Tiwari
+            </a>
+          </p>
         </div>
       </div>
     </footer>
