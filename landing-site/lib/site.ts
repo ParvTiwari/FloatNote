@@ -9,7 +9,7 @@ export const siteConfig = {
   description:
     "FloatNote is a desktop-first meeting assistant that runs quietly in the background — live Whisper transcription, screen OCR, AI summaries, and a chatbot that actually knows your meeting.",
   // Change this to your production domain before deploying.
-  url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://floatnote.app",
+  url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://parv-tiwari-floatnote.vercel.app",
   ogImage: "/opengraph-image",
   keywords: [
     "meeting assistant",
